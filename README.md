@@ -1,8 +1,5 @@
 # auto-vertical-reframe
 Scene-aware vertical auto-reframe CLI that turns horizontal footage into 9:16 video without losing the subject.
-# Auto Vertical Reframe
-
-Scene-aware vertical auto-reframe CLI that turns horizontal footage into 9:16 video without losing the subject.
 
 ![Status](https://img.shields.io/badge/status-beta-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
