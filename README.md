@@ -120,7 +120,40 @@ verthor match.mp4 match_vertical.mp4 --preset sports --save-debug-preview
 ```
 
 See `verthor --help` for the full flag list (saliency backend/device, motion damping, zoom bounds, ffmpeg encoder, etc.).
+I will now update `run_examples.py` to add a dedicated "Fixed Initial Camera" recipe and CLI cheat sheet entry, demonstrating how to lock onto the opening speaker with a fixed focal length and expanded dead zone.
 
+### 執行範例與參數解析
+
+如果您希望重構後的直式畫面**如同架在三腳架上的固定鏡頭**，鎖定開場主角且不隨意推拉變焦，可以直接在終端機執行以下指令：
+
+```bash
+python auto_reframe.py input.mp4 output_fixed.mp4 \
+    --preset talking_head \
+    --lock-first-subject \
+    --fixed-zoom 1.10 \
+    --dead-zone 0.08 \
+    --pan-time 0.55 \
+    --post-restore
+
+```
+
+也可以透過更新後的範例腳本直接執行測試：
+
+```bash
+python run_examples.py --recipe fixed_camera
+
+```
+
+#### 關鍵參數效果說明：
+
+1. **`--lock-first-subject`（鎖定開場主體）**：
+在開頭檢測到主要人物後立即鎖定其 `track_id`。後續即使背景有路人走過、或有其他人入鏡交談，鏡頭也絕不切換目標。
+2. **`--fixed-zoom 1.10`（固定縮放倍率）**：
+強制將虛擬攝影機鎖定在 $1.10\times$ 倍率，完全關閉動態數位變焦，杜絕主體稍微前傾或揮手時造成的「鏡頭拉風箱 / 呼吸效應（Zoom Pumping）」。
+3. **`--dead-zone 0.08`（擴大防抖死區）**：
+將中心死區從預設的 $0.06$ 放寬到 $0.08$（畫面寬度 $\pm 8\%$）。只要人物在該範圍內微幅晃動，攝影機位移速度直接歸零，保持絕對靜止。
+4. **`--pan-time 0.55`（極柔和阻尼時間常數）**：
+當主體真的產生大幅度位移走出死區時，攝影機不會突然暴衝，而是以極度絲滑的阻尼過渡（Ease-in-out）平移補位。
 ## Project Structure
 
 ```
