@@ -2171,9 +2171,8 @@ def draw_debug(
     cw = max(1, right - left)
     ch = max(1, bottom - top)
 
-    reframed_crop = frame[top:bottom, left:right].copy()
     reframed_crop = cv2.resize(
-        reframed_crop,
+        frame[top:bottom, left:right],
         (output_width, output_height),
         interpolation=cv2.INTER_LINEAR,
     )
