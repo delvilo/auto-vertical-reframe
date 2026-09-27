@@ -2236,9 +2236,10 @@ def draw_debug(
             pcy = int((candidate.framing_cy - top) * scale_y)
             cv2.circle(reframed_crop, (pcx, pcy), 8, (255, 0, 255), -1)
 
-    hud_bg = reframed_crop.copy()
-    cv2.rectangle(hud_bg, (10, 10), (450, 160), (20, 20, 20), -1)
-    cv2.addWeighted(hud_bg, 0.75, reframed_crop, 0.25, 0, reframed_crop)
+    hud_sub = reframed_crop[10:161, 10:451]
+    hud_bg = hud_sub.copy()
+    cv2.rectangle(hud_bg, (0, 0), (440, 150), (20, 20, 20), -1)
+    cv2.addWeighted(hud_bg, 0.75, hud_sub, 0.25, 0, hud_sub)
 
     lines = [
         f"Frame: {frame_idx}/{total_frames if total_frames > 0 else '?'}",
