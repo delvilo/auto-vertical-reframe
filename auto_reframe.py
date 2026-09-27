@@ -325,10 +325,12 @@ class DeepGazeMRSaliencyHelper:
         self,
         device: str = "auto",
         max_side: int = 384,
+        trust_repo: bool = False,
     ) -> None:
         self.backend_name = "deepgazemr"
         self.device_name = self._resolve_device(device)
         self.max_side = max(128, int(max_side))
+        self.trust_repo = trust_repo
         self.model = None
         self.tensor_ring = self.host_ring = None
         self.copy_events = []
@@ -384,7 +386,7 @@ class DeepGazeMRSaliencyHelper:
                 "mtangemann/deepgazemr",
                 "DeepGazeMR",
                 pretrained=True,
-                trust_repo=True,
+                trust_repo=self.trust_repo,
             )
             self.model.to(self.device_name)
             if hasattr(self.model, "center_bias") and torch.is_tensor(
@@ -419,7 +421,7 @@ class DeepGazeMRSaliencyHelper:
                     "DeepGazeMR",
                     source="local",
                     pretrained=False,
-                    trust_repo=True,
+                    trust_repo=self.trust_repo,
                 )
                 ckpt_path = repo_path / "data" / "deepgazemr-ledov.pt"
                 bias_path = repo_path / "data" / "center-bias-ledov.pt"
@@ -565,7 +567,9 @@ def build_saliency_helper(args: argparse.Namespace) -> Any:
         backend = HandcraftedSaliencyHelper()
     else:
         backend = DeepGazeMRSaliencyHelper(
-            device=args.saliency_device, max_side=args.saliency_max_side
+            device=args.saliency_device,
+            max_side=args.saliency_max_side,
+            trust_repo=args.saliency_trust_repo,
         )
         backend.max_failures = args.saliency_max_failures
         backend.use_amp = args.saliency_amp
@@ -697,6 +701,11 @@ def parse_args() -> argparse.Namespace:
         default="auto",
     )
     parser.add_argument("--saliency-max-side", type=int, default=384)
+    parser.add_argument(
+        "--saliency-trust-repo",
+        action="store_true",
+        help="Allow torch.hub to execute untrusted code from remote or local repo.",
+    )
 
     parser.add_argument("--speaker-aware-mode", action="store_true")
     parser.add_argument("--speaker-json", default="")
