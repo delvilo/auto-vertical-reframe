@@ -1531,34 +1531,48 @@ def build_candidates(
         return candidates
     raw = boxes.data
     raw = raw.detach().cpu().numpy() if hasattr(raw, "detach") else np.asarray(raw)
-    indices = [i for i, row in enumerate(raw) if int(row[-1]) in allowed_class_ids]
-    mask_data = getattr(getattr(result, "masks", None), "data", None)
-    statistics = mask_statistics(mask_data, indices, (h, w))
-    eligible = set(indices)
-    if cue_top_k:
-        priorities = []
-        for i in indices:
-            row = raw[i]
-            if int(row[-1]) != CLASS_IDS["person"]:
-                continue
-            track_id = int(row[4]) if len(row) == 7 else None
-            score = float(row[-2]) * max(0, row[2] - row[0]) * max(0, row[3] - row[1])
-            priorities.append(
-                (track_id == state.tracked_id and track_id is not None, score, i)
-            )
-        eligible = {i for _, _, i in sorted(priorities, reverse=True)[:cue_top_k]}
-    for i in indices:
+
+    parsed_rows = []
+    priorities = [] if cue_top_k else None
+    for i, row in enumerate(raw):
         try:
-            row = raw[i]
             cls_id = int(row[-1])
+            if cls_id not in allowed_class_ids:
+                continue
             conf = float(row[-2])
             x1, y1, x2, y2 = map(float, row[:4])
+            track_id = int(row[4]) if len(row) == 7 else None
+
+            parsed_rows.append((i, cls_id, conf, x1, y1, x2, y2, track_id))
+            if cue_top_k and cls_id == CLASS_IDS["person"]:
+                score = conf * max(0.0, x2 - x1) * max(0.0, y2 - y1)
+                is_tracked = (track_id == state.tracked_id and track_id is not None)
+                priorities.append((is_tracked, score, i))
+        except Exception:
+            logging.debug("Row parsing failed", exc_info=True)
+            continue
+
+    if not parsed_rows:
+        return candidates
+
+    indices = [item[0] for item in parsed_rows]
+    mask_data = getattr(getattr(result, "masks", None), "data", None)
+    statistics = mask_statistics(mask_data, indices, (h, w))
+
+    if cue_top_k and priorities:
+        eligible = {i for _, _, i in sorted(priorities, reverse=True)[:cue_top_k]}
+    elif cue_top_k:
+        eligible = set()
+    else:
+        eligible = set(indices)
+
+    for i, cls_id, conf, x1, y1, x2, y2, track_id in parsed_rows:
+        try:
             width = max(1.0, x2 - x1)
             height = max(1.0, y2 - y1)
             area = width * height
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
-            track_id = int(row[4]) if len(row) == 7 else None
             cls_name = class_names.get(cls_id, str(cls_id))
 
             mask_area, mask_cx, mask_cy, mask_top_y = statistics.get(
