@@ -887,10 +887,37 @@ def parse_args() -> argparse.Namespace:
     return args
 
 def setup_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level),
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
+    try:
+        import logging.config
+        logging.config.dictConfig({
+            'version': 1,
+            'disable_existing_loggers': False,
+            'formatters': {
+                'standard': {
+                    'format': '%(asctime)s [%(levelname)s] %(message)s'
+                },
+            },
+            'handlers': {
+                'default': {
+                    'level': level,
+                    'formatter': 'standard',
+                    'class': 'logging.StreamHandler',
+                    'stream': 'ext://sys.stdout',
+                },
+            },
+            'loggers': {
+                '': {
+                    'handlers': ['default'],
+                    'level': level,
+                    'propagate': True
+                }
+            }
+        })
+    except Exception:
+        logging.basicConfig(
+            level=getattr(logging, level.upper(), logging.INFO),
+            format="%(asctime)s [%(levelname)s] %(message)s"
+        )
 
 
 def apply_preset(args: argparse.Namespace) -> argparse.Namespace:
