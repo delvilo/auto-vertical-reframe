@@ -626,23 +626,21 @@ class SubjectRankingModel:
         center_affinity = 1.0 - clamp(dist_center / max(frame_diag, 1.0), 0.0, 1.0)
         size_logit = math.log1p(norm_area * 250.0)
 
-        features = {
-            "det_conf": clamp(conf, 0.0, 1.0),
-            "mask_presence": math.sqrt(norm_area),
-            "center_affinity": center_affinity,
-            "face_presence": 1.0 if has_face else 0.0,
-            "pose_presence": 1.0 if has_pose else 0.0,
-            "saliency_presence": 1.0 if saliency_confidence > 0.0 else 0.0,
-            "saliency_conf": clamp(saliency_confidence, 0.0, 1.0),
-            "tracking_match": 1.0 if tracking_match else 0.0,
-            "lock_match": 1.0 if lock_match else 0.0,
-            "speaker_active": 1.0 if speaker_active else 0.0,
-            "size_logit": size_logit,
-        }
-
-        score = self.class_bias.get(cls_name, 0.0)
-        for feature_name, feature_value in features.items():
-            score += self.feature_weights[feature_name] * feature_value
+        weights = self.feature_weights
+        score = (
+            self.class_bias.get(cls_name, 0.0)
+            + weights["det_conf"] * clamp(conf, 0.0, 1.0)
+            + weights["mask_presence"] * math.sqrt(norm_area)
+            + weights["center_affinity"] * center_affinity
+            + (weights["face_presence"] if has_face else 0.0)
+            + (weights["pose_presence"] if has_pose else 0.0)
+            + (weights["saliency_presence"] if saliency_confidence > 0.0 else 0.0)
+            + weights["saliency_conf"] * clamp(saliency_confidence, 0.0, 1.0)
+            + (weights["tracking_match"] if tracking_match else 0.0)
+            + (weights["lock_match"] if lock_match else 0.0)
+            + (weights["speaker_active"] if speaker_active else 0.0)
+            + weights["size_logit"] * size_logit
+        )
 
         return score
 
