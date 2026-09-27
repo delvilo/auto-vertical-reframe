@@ -384,7 +384,7 @@ class DeepGazeMRSaliencyHelper:
                 "mtangemann/deepgazemr",
                 "DeepGazeMR",
                 pretrained=True,
-                trust_repo=True,
+                trust_repo="check",
             )
             self.model.to(self.device_name)
             if hasattr(self.model, "center_bias") and torch.is_tensor(
@@ -419,7 +419,7 @@ class DeepGazeMRSaliencyHelper:
                     "DeepGazeMR",
                     source="local",
                     pretrained=False,
-                    trust_repo=True,
+                    trust_repo="check",
                 )
                 ckpt_path = repo_path / "data" / "deepgazemr-ledov.pt"
                 bias_path = repo_path / "data" / "center-bias-ledov.pt"
