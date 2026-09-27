@@ -2014,23 +2014,6 @@ def build_global_saliency_observation(
         max_zoom=max_zoom,
     )
 
-def advance_value_with_velocity(
-    current: float,
-    target: float,
-    velocity: float,
-    response: float,
-    damping: float,
-    max_velocity: float,
-    dt: float = 1.0,
-) -> tuple[float, float]:
-    steps = max(1, math.ceil(dt))
-    h = dt / steps
-    for _ in range(steps):
-        velocity = velocity * damping**h + (target - current) * response * h
-        velocity = clamp(velocity, -max_velocity, max_velocity)
-        current += velocity * h
-    return current, velocity
-
 
 def apply_camera_motion(
     state: CameraState,
