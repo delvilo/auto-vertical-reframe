@@ -1392,19 +1392,6 @@ def detect_scenes(
         return [1]
 
 
-def mask_stats_from_binary_mask(mask: np.ndarray) -> tuple[float, float, float, float]:
-    binary = np.asarray(mask > 0, dtype=np.uint8)
-    m = cv2.moments(binary, binaryImage=True)
-    if not m["m00"]:
-        return 0.0, 0.0, 0.0, 0.0
-    return (
-        m["m00"],
-        m["m10"] / m["m00"],
-        m["m01"] / m["m00"],
-        float(binary.any(axis=1).argmax()),
-    )
-
-
 def extract_saliency_region(
     saliency_map: np.ndarray,
     bounds: tuple[int, int, int, int],
