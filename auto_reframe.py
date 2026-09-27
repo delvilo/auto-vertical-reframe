@@ -976,14 +976,6 @@ def current_crop_size(
     return crop_w, crop_h
 
 
-def get_track_id(box: Any) -> Optional[int]:
-    try:
-        if box.id is None:
-            return None
-        return int(box.id[0].item())
-    except Exception:
-        return None
-
 class MediaPipeFaceHelper:
     """Detects faces within cropped person bounding boxes using Tasks API or legacy fallback."""
 
