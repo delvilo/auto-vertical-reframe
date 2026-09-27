@@ -423,9 +423,9 @@ class DeepGazeMRSaliencyHelper:
                 )
                 ckpt_path = repo_path / "data" / "deepgazemr-ledov.pt"
                 bias_path = repo_path / "data" / "center-bias-ledov.pt"
-                checkpoint = torch.load(ckpt_path, map_location="cpu")
+                checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
                 self.model.load_state_dict(checkpoint["model_state_dict"])
-                center_bias = torch.load(bias_path, map_location="cpu")
+                center_bias = torch.load(bias_path, map_location="cpu", weights_only=True)
                 if not torch.is_tensor(center_bias):
                     raise ValueError("Missing or invalid center-bias tensor")
                 self.model.center_bias = center_bias.to(self.device_name)
