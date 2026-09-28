@@ -38,32 +38,6 @@ Naive center-cropping loses the subject the moment they move. Manual reframing i
 - Post-processing via ffmpeg: configurable encoder, CRF, audio bitrate, and optional unsharp/denoise pass.
 - Debug preview export for inspecting crop decisions frame-by-frame.
 
-## Architecture
-
-```
-input video
-    │
-    ▼
-PySceneDetect ──── per-scene boundaries
-    │
-    ▼
-YOLOv11-seg + ByteTrack ──── candidates (bbox, mask, track id)
-    │
-    ▼
-MediaPipe face/pose + saliency ──── model signals
-    │
-    ▼
-Subject ranking model ──── selected subject / focus bounds
-    │
-    ▼
-Camera observation + path optimizer ──── smoothed pan/zoom
-    │
-    ▼
-Cropped 1080×1920 frames → ffmpeg encode
-    │
-    ▼
-output MP4
-```
 
 Core logic lives in `src/verthor/auto_reframe.py` as a single pipeline with `Candidate`, `CameraObservation`, and `CameraState` dataclasses.
 
@@ -80,44 +54,9 @@ Core logic lives in `src/verthor/auto_reframe.py` as a single pipeline with `Can
 
 Prerequisites: Python 3.11+ and `ffmpeg` in `PATH` (`brew install ffmpeg` on macOS).
 
-```bash
-git clone https://github.com/KazKozDev/auto-vertical-reframe.git
-cd auto-vertical-reframe
-python3 -m venv .venv && source .venv/bin/activate
-pip install -U pip
-pip install -e .
-
-verthor input.mp4 output_vertical.mp4 --preset talking_head
-```
-
-By default Auto Vertical Reframe uses the fast `handcrafted` saliency backend.
 
 On macOS you can instead double-click `run_verthor.command` — it provisions the venv and prompts for input, preset, debug preview, and saliency mode via native dialogs. If a non-video file is accidentally passed to the launcher, it opens the file picker again instead of trying to process it.
 
-## Usage
-
-Interview / talking head, default 1080×1920:
-```bash
-verthor clip.mp4 clip_vertical.mp4 --preset talking_head
-```
-
-Explicit fast saliency mode:
-```bash
-verthor clip.mp4 clip_vertical.mp4 --saliency-model handcrafted
-```
-
-Slow experimental DeepGaze MR saliency mode:
-```bash
-verthor clip.mp4 clip_vertical.mp4 --saliency-model deepgazemr
-```
-
-Sports footage with wider framing and debug preview:
-```bash
-verthor match.mp4 match_vertical.mp4 --preset sports --save-debug-preview
-```
-
-See `verthor --help` for the full flag list (saliency backend/device, motion damping, zoom bounds, ffmpeg encoder, etc.).
-I will now update `run_examples.py` to add a dedicated "Fixed Initial Camera" recipe and CLI cheat sheet entry, demonstrating how to lock onto the opening speaker with a fixed focal length and expanded dead zone.
 
 ### 執行範例與參數解析
 
@@ -151,31 +90,10 @@ python run_examples.py --recipe fixed_camera
 將中心死區從預設的 $0.06$ 放寬到 $0.08$（畫面寬度 $\pm 8\%$）。只要人物在該範圍內微幅晃動，攝影機位移速度直接歸零，保持絕對靜止。
 4. **`--pan-time 0.55`（極柔和阻尼時間常數）**：
 當主體真的產生大幅度位移走出死區時，攝影機不會突然暴衝，而是以極度絲滑的阻尼過渡（Ease-in-out）平移補位。
-## Project Structure
 
-```
-verthor/
-├── src/verthor/
-│   ├── auto_reframe.py   # full pipeline: detection, tracking, framing, encode
-│   └── __main__.py       # `python -m verthor` entry
-├── assets/               # demo clips used in the README
-├── run_verthor.command   # macOS double-click launcher
-├── yolo11n-seg.pt        # default segmentation weights
-├── pyproject.toml
-└── requirements.txt
-```
 
 ## Status
 
-Beta. API and CLI flags may change between versions.
-
-## Releases
-
-
-
-## Testing
-
-
----
+This implementation is derived from https://github.com/KazKozDev/auto-vertical-reframe
 
 MIT — see [LICENSE](LICENSE)
