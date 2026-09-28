@@ -171,18 +171,11 @@ Beta. API and CLI flags may change between versions.
 
 ## Releases
 
-- [0.1.0](CHANGELOG.md#010---2026-04-19) - initial beta release.
+
 
 ## Testing
 
-Testing is planned for future releases.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 
 MIT — see [LICENSE](LICENSE)
-
-KazKozDev — [kazkozdev@gmail.com](mailto:kazkozdev@gmail.com) — [LinkedIn](https://www.linkedin.com/in/kazkozdev)
