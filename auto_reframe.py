@@ -3353,7 +3353,8 @@ def regression_velocity(history):
     if len(history) < 3:
         return 0.0, 0.0
     a = np.asarray(history, dtype=np.float64)
-    i, j = np.triu_indices(len(a), 1)
+    # Use k=1 keyword arg for upper triangle offset (second positional arg in np.triu_indices is m, not k)
+    i, j = np.triu_indices(len(a), k=1)
     dt = a[j, 0] - a[i, 0]
     valid = dt > 1e-6
     if not valid.any():
