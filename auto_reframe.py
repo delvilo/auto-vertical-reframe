@@ -255,12 +255,18 @@ class HandcraftedSaliencyHelper:
         small_w = max(32, int(round(frame_w * scale)))
         small_h = max(32, int(round(frame_h * scale)))
 
-        gray_small = cv2.cvtColor(
-            cv2.resize(
+        # Optimization: skip redundant resize if frame_bgr is already at target dimensions
+        if frame_w == small_w and frame_h == small_h:
+            resized_bgr = frame_bgr
+        else:
+            resized_bgr = cv2.resize(
                 frame_bgr,
                 (small_w, small_h),
                 interpolation=cv2.INTER_AREA,
-            ),
+            )
+
+        gray_small = cv2.cvtColor(
+            resized_bgr,
             cv2.COLOR_BGR2GRAY,
         ).astype(np.float32)
 
@@ -298,6 +304,10 @@ class HandcraftedSaliencyHelper:
             saliency_small = saliency_small * 0.72 + motion * 0.28
 
         self.prev_gray_small = gray_small
+
+        # Optimization: skip redundant output resize if saliency_small is already full frame
+        if frame_w == small_w and frame_h == small_h:
+            return saliency_small
 
         return cv2.resize(
             saliency_small,
@@ -3134,6 +3144,10 @@ def mask_statistics(masks, indices: list[int], frame_shape: tuple[int, int]) -> 
     valid = [i for i in indices if i < len(masks)]
     output = {}
     if torch is not None and torch.is_tensor(masks):
+        # Optimization: Pre-allocate 1D coordinate tensors once outside the batch loop
+        # to prevent redundant device allocations on every 16-mask chunk.
+        xs = torch.arange(right - left, device=masks.device, dtype=torch.float32)
+        ys = torch.arange(bottom - top, device=masks.device, dtype=torch.float32)
         for start in range(0, len(valid), 16):
             ids = valid[start : start + 16]
             binary = masks[ids, top:bottom, left:right] > 0.5
@@ -3141,8 +3155,6 @@ def mask_statistics(masks, indices: list[int], frame_shape: tuple[int, int]) -> 
             cols = binary.sum(dim=1, dtype=torch.float32)
             count = rows.sum(dim=1)
             denom = count.clamp_min(1)
-            xs = torch.arange(right - left, device=masks.device, dtype=torch.float32)
-            ys = torch.arange(bottom - top, device=masks.device, dtype=torch.float32)
             cx = (cols * xs).sum(dim=1) / denom
             cy = (rows * ys).sum(dim=1) / denom
             ytop = (rows > 0).to(torch.int32).argmax(dim=1)
