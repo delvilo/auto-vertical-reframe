@@ -4,10 +4,12 @@ import sys
 from pathlib import Path
 
 # Mock dependencies that might not be installed in the environment before importing auto_reframe
-sys.modules['cv2'] = MagicMock()
-sys.modules['scenedetect'] = MagicMock()
-sys.modules['ultralytics'] = MagicMock()
-sys.modules['numpy'] = MagicMock()
+for mod in ['cv2', 'scenedetect', 'ultralytics']:
+    if mod not in sys.modules:
+        try:
+            __import__(mod)
+        except ImportError:
+            sys.modules[mod] = MagicMock()
 
 import auto_reframe
 
