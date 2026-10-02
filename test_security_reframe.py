@@ -1,6 +1,15 @@
 import argparse
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
+
+for mod in ['cv2', 'scenedetect', 'ultralytics', 'mediapipe']:
+    if mod not in sys.modules:
+        try:
+            __import__(mod)
+        except ImportError:
+            sys.modules[mod] = MagicMock()
+
 import auto_reframe
 from auto_reframe import DeepGazeMRSaliencyHelper, build_saliency_helper
 
