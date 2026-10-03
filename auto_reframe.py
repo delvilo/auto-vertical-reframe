@@ -276,11 +276,14 @@ class HandcraftedSaliencyHelper:
         magnitude = cv2.magnitude(real, imag)
         log_amplitude = np.log(magnitude + 1e-6)
         spectral_residual = log_amplitude - cv2.blur(log_amplitude, (3, 3))
-        phase = cv2.phase(real, imag)
 
-        exp_residual = np.exp(spectral_residual)
-        residual_real = exp_residual * np.cos(phase)
-        residual_imag = exp_residual * np.sin(phase)
+        # Optimization: avoid expensive elementwise cv2.phase (arctan2), cos, and sin calls.
+        # Since real + i*imag = magnitude * (cos(phase) + i*sin(phase)),
+        # cos(phase) = real / magnitude and sin(phase) = imag / magnitude.
+        # Thus residual_real = exp(spectral_residual) * real / magnitude and residual_imag = exp(spectral_residual) * imag / magnitude.
+        factor = np.exp(spectral_residual) / (magnitude + 1e-6)
+        residual_real = real * factor
+        residual_imag = imag * factor
         residual_spectrum = np.dstack([residual_real, residual_imag]).astype(np.float32)
         saliency_small = cv2.idft(
             residual_spectrum,
