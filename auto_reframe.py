@@ -279,8 +279,9 @@ class HandcraftedSaliencyHelper:
         phase = cv2.phase(real, imag)
 
         exp_residual = np.exp(spectral_residual)
-        residual_real = exp_residual * np.cos(phase)
-        residual_imag = exp_residual * np.sin(phase)
+        # Optimization: cv2.polarToCart leverages C++/SIMD vectorization for polar-to-cartesian
+        # conversion, avoiding intermediate array allocations and Python/NumPy loop overhead.
+        residual_real, residual_imag = cv2.polarToCart(exp_residual, phase)
         residual_spectrum = np.dstack([residual_real, residual_imag]).astype(np.float32)
         saliency_small = cv2.idft(
             residual_spectrum,
