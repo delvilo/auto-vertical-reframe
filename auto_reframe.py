@@ -9,6 +9,7 @@ two-person boundary fitting, and live encoder preflight into a single-pass pipel
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import logging
 import math
@@ -3362,13 +3363,19 @@ def critically_damped_step(current, target, velocity, dt, tau, max_speed):
     return value, clamp(new_velocity, -max_speed, max_speed)
 
 
+@functools.lru_cache(maxsize=64)
+def _get_triu_indices(n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Caches upper triangle index pairs for motion history windows to avoid redundant array creation."""
+    return np.triu_indices(n, k=1)
+
+
 def regression_velocity(history):
     """Robust multi-frame velocity in pixels/second using median pairwise slopes."""
     if len(history) < 3:
         return 0.0, 0.0
     a = np.asarray(history, dtype=np.float64)
-    # Use k=1 keyword arg for upper triangle offset (second positional arg in np.triu_indices is m, not k)
-    i, j = np.triu_indices(len(a), k=1)
+    # Optimization: Use LRU-cached upper triangle indices to avoid allocating pair index arrays every frame
+    i, j = _get_triu_indices(len(a))
     dt = a[j, 0] - a[i, 0]
     valid = dt > 1e-6
     if not valid.any():
