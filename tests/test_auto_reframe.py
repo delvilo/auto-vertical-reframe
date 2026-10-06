@@ -3,7 +3,7 @@ import sys
 from unittest.mock import MagicMock
 
 # Mock heavy video dependencies if not installed
-for mod in ['cv2', 'scenedetect', 'ultralytics', 'mediapipe']:
+for mod in ['cv2', 'scenedetect', 'ultralytics']:
     if mod not in sys.modules:
         try:
             __import__(mod)
@@ -79,3 +79,4 @@ class TestAutoReframe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

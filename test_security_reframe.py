@@ -3,7 +3,7 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-for mod in ['cv2', 'scenedetect', 'ultralytics', 'mediapipe']:
+for mod in ['cv2', 'scenedetect', 'ultralytics']:
     if mod not in sys.modules:
         try:
             __import__(mod)
@@ -92,3 +92,4 @@ class TestSecurityReframe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

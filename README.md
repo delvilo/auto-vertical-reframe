@@ -4,11 +4,10 @@ Scene-aware vertical auto-reframe CLI that turns horizontal footage into 9:16 vi
 
 ## Highlights
 
-- Tracks people, pets, and vehicles through scene cuts with YOLOv11 segmentation and ByteTrack.
-- Face-, pose-, and saliency-aware framing with a subject ranking model and smoothed camera path.
+- Tracks people, pets, and vehicles through scene cuts with YOLO26 segmentation and ByteTrack.
+- Head-, pose-, and saliency-aware framing with a subject ranking model and smoothed camera path.
 - Four tuned presets (`talking_head`, `sports`, `pets`, `cars`) with sensible zoom and motion limits.
 - Fast `handcrafted` saliency by default, with optional slow/experimental `deepgazemr` model saliency.
-- One-click macOS launcher (`run_verthor.command`) with native dialogs for video, preset, saliency mode, and debug preview.
 
 ## Demo
 
@@ -22,13 +21,13 @@ Full-quality files: [assets/demo_source.mp4](assets/demo_source.mp4), [assets/de
 
 Vertical platforms (Reels, Shorts, TikTok) demand 9:16 video, but most source material is shot horizontally. Auto Vertical Reframe reads a video, detects subjects per scene, ranks candidate subjects using model signals, and drives a virtual camera (pan + zoom) through a smoothed path optimizer. It emits a ready-to-publish MP4 via ffmpeg.
 
-Naive center-cropping loses the subject the moment they move. Manual reframing is tedious for long footage. Auto Vertical Reframe combines segmentation, face/pose cues, saliency, tracking continuity, and scene detection so each shot gets its own framing decision without relying on a static center crop.
+Naive center-cropping loses the subject the moment they move. Manual reframing is tedious for long footage. Auto Vertical Reframe combines segmentation, head/pose cues, saliency, tracking continuity, and scene detection so each shot gets its own framing decision without relying on a static center crop.
 
 ## Features
 
 - Per-scene subject selection via PySceneDetect (`AdaptiveDetector`).
-- YOLOv11 instance segmentation with configurable classes and confidence.
-- MediaPipe face detection and pose landmarks for framing cues.
+- YOLO26 instance segmentation with configurable classes and confidence.
+- YOLO26n-pose COCO-17 keypoints with conservative head estimates and batched person ROIs.
 - Two-person framing mode when a second subject crosses a spatial threshold.
 - `handcrafted` saliency mode by default: fast and usually best for simple single-subject videos.
 - Optional `deepgazemr` saliency mode: slower, experimental, useful to try on complex or ambiguous scenes.
@@ -39,72 +38,125 @@ Naive center-cropping loses the subject the moment they move. Manual reframing i
 - Debug preview export for inspecting crop decisions frame-by-frame.
 
 
-Core logic lives in `src/verthor/auto_reframe.py` as a single pipeline with `Candidate`, `CameraObservation`, and `CameraState` dataclasses.
+Core logic lives in `auto_reframe.py` as a single pipeline with `Candidate`, `CameraObservation`, and `CameraState` dataclasses.
 
 ## Tech Stack
 
 - **Language:** Python 3.11+
-- **Detection & tracking:** Ultralytics YOLOv11, ByteTrack (`lap`)
-- **Pose & face:** MediaPipe 0.10
+- **Detection & tracking:** Ultralytics YOLO26, ByteTrack (`lap`)
+- **Pose & head cues:** YOLO26n-pose (`yolo26n-pose.pt`)
 - **Scene detection:** PySceneDetect
-- **ML runtime:** PyTorch 2.2+
+- **ML runtime:** PyTorch 2.6+ (CUDA, CPU or MPS)
 - **Encoding:** ffmpeg (external)
 
 ## Quick Start
 
-Prerequisites: Python 3.11+ and `ffmpeg` in `PATH` (`brew install ffmpeg` on macOS).
+Python 3.11+ and an external `ffmpeg` executable are required. Install Python packages
+with the interpreter that will run the application:
 
+```bash
+python3 -m pip install -r requirements.txt
+python3 auto_reframe.py input.mp4 output.mp4 --device auto
+```
 
-On macOS you can instead double-click `run_verthor.command` — it provisions the venv and prompts for input, preset, debug preview, and saliency mode via native dialogs. If a non-video file is accidentally passed to the launcher, it opens the file picker again instead of trying to process it.
+`requirements.txt` pins Ultralytics to the version observed in the working Colab
+runtime and lists the direct inference/tracking dependencies. It uses one OpenCV
+provider (`opencv-python`); installing headless/contrib providers alongside it can
+overwrite the same `cv2` files. PyTorch/torchvision requirements accept compatible
+CUDA builds already present in Colab. FFmpeg and NVIDIA drivers are not pip packages.
+A fresh GPU environment needs a matching CUDA-enabled PyTorch/torchvision installation.
 
+### Colab：從 MediaPipe 遷移
 
-### 執行範例與參數解析
+先將 `/content/auto-vertical-reframe` 切換到要使用的版本，再執行：
 
-### Colab T4：裝置確認與即時診斷
+```python
+!python3 -u /content/auto-vertical-reframe/install_colab.py
+```
 
-YOLO/PyTorch 推論、MediaPipe 人臉／姿態分析、FFmpeg 編碼各自使用不同後端。
-`--device auto` 在 CUDA 可用時明確選擇 `cuda:0`，否則記錄原因並使用 CPU。
-`--device 0` 強制使用第一張 GPU；無法使用時直接報錯，不會悄悄改成 CPU。
-第一幀推論後會輸出 `YOLO actual inference device=...`，結尾 Summary 會列出
-實際模型、YOLO 裝置，以及要求／實際選用的編碼器。
+安裝程式會：
 
-先在與影片相同的工作目錄，使用目前執行的 Python 與程式做環境診斷：
+1. 使用同一個 Python 卸載 `mediapipe`，移除本程式曾下載的兩個舊模型快取。
+2. 清除四種可能重疊的 OpenCV distributions，再依 `requirements.txt` 安裝單一 provider。
+3. 使用暫存 constraints 保留現有 torch／torchvision 的完整版本（含 `+cu130` 等標記）；
+   若依賴不相容會停止並顯示錯誤。
+4. 在新 Python 程序驗證套件可匯入、MediaPipe 已不可匯入，印出版本與 CUDA 狀態。
+5. 將新版程式安裝到 `/usr/local/bin/auto_reframe.py`。
+
+每個 pip 子程序都保留 stdout、stderr，失敗時安裝會停止。
+不移除其他程式共用的 TensorFlow／protobuf 等依賴。
+若先前 notebook cell 匯入過相關套件，安裝後重新啟動 Colab session，
+再掛載 Drive／回到影片目錄；不要重跑含有 `mediapipe` 的舊安裝 cell。
+
+### YOLO26n-pose 的構圖方式
+
+- `yolo26n-seg.pt` 持續負責分割、ByteTrack ID 與原本的非人物類別。
+- `yolo26n-pose.pt` 每次處理一批 BGR 人物 ROI，由同一份 17 點結果產生身體與頭部線索。
+- 使用分割人物框匹配姿態結果。即使設定 `--cue-top-k`，配對仍會考慮所有人物；
+  重疊且無法可靠歸屬的姿態不會套用到目標人物。
+- 頭部框由鼻、眼、耳等可信點估算，不是獨立人臉偵測。點位不足時使用人物框／遮罩構圖。
+- COCO 沒有嘴角、腳跟或腳尖；移除未使用的 `chin_y`，並保留分割框下緣以保護腳部。
+- 場景切換清除快取；人物快速移動或重疊會重新推論。`--cue-interval 0` 可逐幀更新。
+- 模型格式錯誤、推論例外或指定 GPU 不可用時，輸出 traceback 並失敗退出。
+  單幀沒有可信關鍵點是正常結果，會使用已有的分割構圖資訊。
+
+| 參數 | 預設／用途 |
+| --- | --- |
+| `--pose-model` | `yolo26n-pose.pt`；也接受本機 COCO-17、person 類別的 `.pt` 模型 |
+| `--pose-imgsz` | `640`；32 的正整數倍 |
+| `--pose-conf` | `0.25`；姿態人物框的偵測門檻 |
+| `--keypoint-conf` | `0.35`；個別關鍵點的可信度門檻 |
+| `--pose-batch-size` | `4`；每批最多處理的人物 ROI 數 |
+| `--cue-interval` | `0.2` 秒；每個追蹤 ID 的姿態快取更新間隔 |
+| `--device` | `auto`；分割與姿態共用。`0` 強制第一張 CUDA GPU，`cpu` 使用 CPU |
+
+舊 `--face-model` 已移除；`.task`／`.tflite` 不再是可接受的姿態模型。
+官方模型首次使用時自動下載；離線執行請預先準備兩個 `.pt` 權重。
+姿態模型只在允許的類別包含 `person` 時載入。
+
+### Colab T4：診斷與短片驗證
+
+不讀取影片／下載模型的環境診斷：
 
 ```python
 !python3 -u /usr/local/bin/auto_reframe.py --diagnose-env --device 0 --video-encoder hevc_nvenc --post-restore --native-debug --log-level DEBUG --ffmpeg-log-level info
 ```
 
-此模式不讀取影片或下載模型。它列出程式路徑與 SHA256、Python、套件、GPU 資訊，
-實測 CUDA 矩陣乘法及卷積，再使用指定編碼器與後處理濾鏡做兩幀測試。
-如果要求 `hevc_nvenc` 卻只能回退 `libx264`，診斷會回傳失敗狀態。
-一般影片處理仍保留原有的編碼器回退行為，並明確記錄失敗原因及實際編碼器。
+此模式列出 Python、套件與 GPU，執行 CUDA 矩陣乘法、卷積與兩幀 NVENC 測試。
+它不代表姿態模型已實測。以下 cell 使用原本參數測試 90 幀，同步保留 terminal 輸出、
+日誌和失敗狀態；請在影片所在目錄執行：
 
-接著用明確的模型名稱與原本參數，先跑 90 幀：
-
-```python
-!python3 -u /usr/local/bin/auto_reframe.py 'vv110.mp4' 'vv110V_test.mp4' --seg-model yolo26n-seg.pt --device 0 --lock-first-subject --dead-zone 0.15 --post-restore --video-encoder hevc_nvenc --max-frames 90 --native-debug --log-level DEBUG --ffmpeg-log-level info
+```bash
+%%bash
+set -euo pipefail
+python3 -u /usr/local/bin/auto_reframe.py \
+  'vv110.mp4' 'vv110V_pose_test.mp4' \
+  --seg-model yolo26n-seg.pt --pose-model yolo26n-pose.pt --device 0 \
+  --lock-first-subject --dead-zone 0.15 --post-restore \
+  --video-encoder hevc_nvenc --max-frames 90 \
+  --native-debug --log-level DEBUG --ffmpeg-log-level info \
+  2>&1 | tee /content/reframe-yolo-pose-test.log
 ```
 
-`--max-frames` 只限制這次輸出的影片長度；正式處理時移除它並更換輸出檔名。
-輸入檔名需完全一致，例如 `vv110.mp4` 與 `v110.mp4` 是不同檔案。
-若曾把程式複製到 `/usr/local/bin/auto_reframe.py`，更新 Git checkout 後也要重新複製：
+確認兩行 `YOLO segmentation actual inference device=cuda:0` 與
+`YOLO pose actual inference device=cuda:0`，以及最終 Summary 的
+`video_encoder_actual=hevc_nvenc`。如果片段未偵測到人物，pose 不會推論，
+`pose_device` 為 null；這不能視為 pose GPU 測試成功。
+Summary 另外列出 `frames_with_head_cues`、`frames_with_pose`、
+`pose_rois_inferred`、`pose_rois_matched`、`pose_cache_hits`。
+`frames_with_head_cues` 不可直接當作舊版的「人臉偵測率」。
 
-```python
-import shutil
-shutil.copy2('/content/auto-vertical-reframe/auto_reframe.py', '/usr/local/bin/auto_reframe.py')
-```
+`--native-debug` 在匯入 PyTorch 前啟用 `TORCH_SHOW_CPP_STACKTRACES=1` 與
+Python faulthandler，並印出採用的設定及 PyTorch build 資訊。
+`DEBUG` 顯示 ROI 尺寸、批次參數、FFmpeg 命令／PID／退出碼；
+所有原生錯誤與 FFmpeg stderr 都保留，不以降低 log level 隱藏問題。
+指定編碼器無法初始化時，一般處理會記錄並回退，`--diagnose-env` 則回報失敗。
 
-| 訊息／參數 | 判讀或用途 |
-| --- | --- |
-| `cudart_stub.cc: Could not find cuda drivers...` | 可能是 MediaPipe 匯入時的 CUDA runtime 探測訊息；需和 PyTorch 實測、實際 YOLO 裝置分開判斷。`libcuda.so.1` 可載入不代表每個套件都能按名稱載入它需要的 `libcudart`。 |
-| `Created TensorFlow Lite XNNPACK delegate for CPU` | MediaPipe 在此程式明確使用 CPU delegate，這是資訊訊息；不決定 YOLO 或 NVENC 的裝置。 |
-| `NORM_RECT without IMAGE_DIMENSIONS` | 來自 MediaPipe 套件內部的 landmark projection graph。Tasks 的 Python `detect()` 沒有同名 `IMAGE_DIMENSIONS` 參數；不能憑這句警告判定外部裁切圖形狀有錯。原始警告保留，`DEBUG` 額外列出傳入 ROI 的尺寸。 |
-| `--native-debug` | 在匯入原生套件前啟用 `dso_loader=2`，並印出採用的環境參數；不修改 CUDA 函式庫搜尋路徑。 |
-| `--log-level DEBUG` | 列出完整 CLI 設定、ROI 尺寸、FFmpeg 子程序命令、PID 與退出狀態。 |
-| `--ffmpeg-log-level info` | 提高 FFmpeg 詳細程度；原始 stderr 即時送到 terminal，同時保留有界的錯誤摘要供例外使用。 |
+確認短片構圖與音畫同步後，移除 `--max-frames 90` 並更換輸出檔名處理完整影片。
+以相同影片比較速度與峰值顯存；姿態與分割共用 GPU，不保證整體處理速度一定提高。
 
-原生 MediaPipe／TensorFlow 警告不會被過濾；face/pose 初始化與推論例外會附 traceback 輸出。
-`--native-debug` 提供更多載入證據，並不承諾消除套件內部警告。
+官方介面參考：[Pose](https://docs.ultralytics.com/tasks/pose/)、
+[NumPy/BGR 輸入](https://docs.ultralytics.com/modes/predict/)。
 
 ### 固定鏡頭範例
 
@@ -118,13 +170,6 @@ python auto_reframe.py input.mp4 output_fixed.mp4 \
     --dead-zone 0.08 \
     --pan-time 0.55 \
     --post-restore
-
-```
-
-也可以透過更新後的範例腳本直接執行測試：
-
-```bash
-python run_examples.py --recipe fixed_camera
 
 ```
 
