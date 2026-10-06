@@ -663,7 +663,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("input", help="Source widescreen video file")
     parser.add_argument("output", help="Destination vertical video file")
 
-    parser.add_argument("--seg-model", default="yolo11n-seg.pt")
+    parser.add_argument("--seg-model", default="yolo26n-seg.pt")
     parser.add_argument("--tracker", default="bytetrack.yaml")
     parser.add_argument("--conf", type=float, default=0.30)
 
