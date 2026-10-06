@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Auto Vertical Reframe — full performance and composition architecture.
 
-Combines low-overhead GPU mask statistics, shared lazy ROI evaluation,
+Combines GPU segmentation and batched COCO-17 pose/head cues,
 optical-flow saliency sampling, Theil-Sen robust velocity prediction,
 two-person boundary fitting, and live encoder preflight into a single-pass pipeline.
 """
@@ -22,56 +22,24 @@ import subprocess
 import sys
 import tempfile
 import threading
-import traceback
-import urllib.request
 from collections import deque
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-# Native loaders run during imports, before argparse or Python logging is ready.
+# Configure native traceback diagnostics before importing PyTorch.
 if __name__ == "__main__" and "--native-debug" in sys.argv[1:]:
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-    modules = [entry for entry in os.environ.get("TF_CPP_VMODULE", "").split(",")
-               if entry and not entry.startswith("dso_loader=")]
-    os.environ["TF_CPP_VMODULE"] = ",".join([*modules, "dso_loader=2"])
-    print("Native diagnostics: TF_CPP_MIN_LOG_LEVEL=0 TF_CPP_VMODULE="
-          + os.environ["TF_CPP_VMODULE"], file=sys.stderr, flush=True)
+    import faulthandler
+    os.environ["TORCH_SHOW_CPP_STACKTRACES"] = "1"
+    faulthandler.enable()
+    print("Native diagnostics: TORCH_SHOW_CPP_STACKTRACES=1; faulthandler enabled",
+          file=sys.stderr, flush=True)
 
 import cv2
 import numpy as np
 from scenedetect import AdaptiveDetector, SceneManager, open_video
 from ultralytics import YOLO
-
-# Modern MediaPipe Tasks Vision API
-MP_IMPORT_ERROR = None
-try:
-    import mediapipe as mp
-    from mediapipe.tasks import python as mp_python
-    from mediapipe.tasks.python import vision as mp_vision
-
-    HAS_MP_TASKS = True
-except Exception:
-    MP_IMPORT_ERROR = traceback.format_exc()
-    mp = None
-    mp_python = None
-    mp_vision = None
-    HAS_MP_TASKS = False
-
-# Legacy solutions fallback (for mediapipe < 0.10.31)
-try:
-    from mediapipe.python.solutions import face_detection as legacy_mp_face
-    from mediapipe.python.solutions import pose as legacy_mp_pose
-except Exception:
-    try:
-        from mediapipe import solutions as mp_solutions
-
-        legacy_mp_face = getattr(mp_solutions, "face_detection", None)
-        legacy_mp_pose = getattr(mp_solutions, "pose", None)
-    except Exception:
-        legacy_mp_face = None
-        legacy_mp_pose = None
 
 try:
     import torch
@@ -121,63 +89,6 @@ PRESETS = {
     },
 }
 
-DEFAULT_FACE_MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/face_detector/"
-    "blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
-)
-DEFAULT_POSE_MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-    "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
-)
-
-def ensure_mediapipe_model(
-    model_name_or_path: Optional[str],
-    default_filename: str,
-    url: str,
-) -> Optional[Path]:
-    """Ensures that required MediaPipe model weights are present locally or cached."""
-    if model_name_or_path:
-        custom_path = Path(model_name_or_path)
-        if not custom_path.is_file():
-            raise FileNotFoundError(
-                f"Explicit MediaPipe model not found: {custom_path}"
-            )
-        return custom_path
-
-    cache_dir = Path.home() / ".cache" / "mediapipe"
-    target_path = cache_dir / default_filename
-
-    if target_path.exists():
-        return target_path
-
-    try:
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        logging.info("Downloading MediaPipe model %s from %s...", default_filename, url)
-        with tempfile.NamedTemporaryFile(
-            dir=target_path.parent, suffix=".tmp", delete=False
-        ) as tmp:
-            temp_file = Path(tmp.name)
-            with urllib.request.urlopen(url, timeout=30) as response:
-                shutil.copyfileobj(response, tmp)
-        if temp_file.stat().st_size == 0:
-            raise ValueError("Downloaded model is empty")
-        os.replace(temp_file, target_path)
-        logging.info("Saved MediaPipe model to %s", target_path)
-        return target_path
-    except Exception as exc:
-        if "temp_file" in locals() and temp_file.exists():
-            try:
-                temp_file.unlink()
-            except Exception:
-                pass
-        logging.warning(
-            "Could not download MediaPipe model (%s): %s. "
-            "Supply a local model via CLI options if offline.",
-            default_filename,
-            exc,
-        )
-        return None
-
 @dataclass
 class Candidate:
     cls_id: int
@@ -199,11 +110,11 @@ class Candidate:
     mask_top_y: float
     framing_cx: float
     framing_cy: float
-    face_box: Optional[tuple[int, int, int, int]]
+    head_box: Optional[tuple[float, float, float, float]]
+    has_pose: bool = False
     score: float = 0.0
     rank_confidence: float = 0.5
     eye_y: Optional[float] = None
-    chin_y: Optional[float] = None
     body_top_y: Optional[float] = None
     body_bottom_y: Optional[float] = None
     body_cx: Optional[float] = None
@@ -627,7 +538,7 @@ class SubjectRankingModel:
             "det_conf": 1.35,
             "mask_presence": 0.95,
             "center_affinity": 0.55,
-            "face_presence": 0.48,
+            "head_presence": 0.24,
             "pose_presence": 0.34,
             "saliency_presence": 0.72,
             "saliency_conf": 0.78,
@@ -646,7 +557,7 @@ class SubjectRankingModel:
         frame_area: float,
         dist_center: float,
         frame_diag: float,
-        has_face: bool,
+        has_head: bool,
         has_pose: bool,
         saliency_confidence: float,
         tracking_match: bool,
@@ -663,7 +574,7 @@ class SubjectRankingModel:
             + weights["det_conf"] * clamp(conf, 0.0, 1.0)
             + weights["mask_presence"] * math.sqrt(norm_area)
             + weights["center_affinity"] * center_affinity
-            + (weights["face_presence"] if has_face else 0.0)
+            + (weights["head_presence"] if has_head else 0.0)
             + (weights["pose_presence"] if has_pose else 0.0)
             + (weights["saliency_presence"] if saliency_confidence > 0.0 else 0.0)
             + weights["saliency_conf"] * clamp(saliency_confidence, 0.0, 1.0)
@@ -684,7 +595,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--diagnose-env", action="store_true",
                         help="Print runtime/GPU diagnostics and test the requested encoder, then exit")
     parser.add_argument("--native-debug", action="store_true",
-                        help="Enable native DSO loader logs before importing MediaPipe; keep stderr visible")
+                        help="Enable PyTorch C++ tracebacks and Python fault diagnostics; keep stderr visible")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Process only the first N frames for a short diagnostic render")
     parser.add_argument("--device", default="auto",
@@ -724,8 +635,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--two-person-framing", action="store_true")
     parser.add_argument("--two-person-threshold", type=float, default=0.75)
 
-    parser.add_argument("--face-model", default="", help="Path to MediaPipe face detector model.")
-    parser.add_argument("--pose-model", default="", help="Path to MediaPipe pose landmarker model.")
+    parser.add_argument("--pose-model", default="yolo26n-pose.pt",
+                        help="Official YOLO26n pose weights or local COCO-17 person .pt checkpoint")
+    parser.add_argument("--pose-imgsz", type=int, default=640)
+    parser.add_argument("--pose-conf", type=float, default=0.25,
+                        help="Pose person detection confidence threshold")
+    parser.add_argument("--keypoint-conf", type=float, default=0.35,
+                        help="Minimum confidence for a framing keypoint")
+    parser.add_argument("--pose-batch-size", type=int, default=4,
+                        help="Maximum person ROIs per pose inference batch")
 
     parser.add_argument(
         "--saliency-model",
@@ -797,7 +715,7 @@ def parse_args() -> argparse.Namespace:
         "--cue-interval",
         type=float,
         default=0.2,
-        help="Seconds between face/pose updates per track; 0 analyzes every frame",
+        help="Seconds between pose/head updates per track; 0 analyzes every frame",
     )
     parser.add_argument(
         "--cue-top-k",
@@ -864,6 +782,14 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not args.diagnose_env and (not args.input or not args.output):
         parser.error("input and output are required unless --diagnose-env is used")
+    if args.pose_imgsz < 32 or args.pose_imgsz % 32 or args.pose_batch_size < 1:
+        parser.error("pose-imgsz must be a positive multiple of 32; pose-batch-size must be >= 1")
+    for key in ("pose_conf", "keypoint_conf"):
+        value = getattr(args, key)
+        if not math.isfinite(value) or not 0 < value <= 1:
+            parser.error(f"{key} must be finite and in (0, 1]")
+    if Path(args.pose_model).suffix.lower() != ".pt":
+        parser.error("pose-model requires a COCO-17 YOLO .pt checkpoint")
     if args.max_frames is not None and args.max_frames < 1:
         parser.error("max-frames must be >= 1")
 
@@ -979,8 +905,8 @@ def log_runtime_info(args) -> None:
     logging.info("Command: %s", shlex.join([sys.executable, *sys.argv]))
     logging.info("YOLO model=%s requested_device=%s selected_device=%s",
                  args.seg_model, args.device, args.yolo_device)
-    logging.info("Encoder requested=%s; MediaPipe face/pose delegate=CPU (independent of YOLO)",
-                 args.video_encoder)
+    logging.info("YOLO pose model=%s selected_device=%s; encoder requested=%s",
+                 args.pose_model, args.yolo_device, args.video_encoder)
     if torch is not None:
         logging.info("PyTorch=%s CUDA build=%s CUDA available=%s",
                      torch.__version__, torch.version.cuda, torch.cuda.is_available())
@@ -988,15 +914,18 @@ def log_runtime_info(args) -> None:
             index = int(args.yolo_device.split(":")[1])
             logging.info("YOLO GPU=%s capability=%s", torch.cuda.get_device_name(index),
                          torch.cuda.get_device_capability(index))
-    if MP_IMPORT_ERROR:
-        logging.warning("MediaPipe Tasks import failed; checking legacy fallback:\n%s", MP_IMPORT_ERROR)
+    if args.native_debug and torch is not None:
+        logging.info("Native diagnostics: TORCH_SHOW_CPP_STACKTRACES=%s cuDNN=%s enabled=%s",
+                     os.environ.get("TORCH_SHOW_CPP_STACKTRACES", "<unset>"),
+                     torch.backends.cudnn.version(), torch.backends.cudnn.enabled)
+        logging.info("PyTorch build configuration:\n%s", torch.__config__.show())
     logging.debug("Resolved arguments: %s", vars(args))
 
 
-def verify_yolo_device(model, expected: str) -> str:
+def verify_yolo_device(model, expected: str, label: str = "segmentation") -> str:
     """Report the predictor's actual backend after lazy model initialization."""
     actual = str(model.predictor.device)
-    logging.info("YOLO actual inference device=%s (selected=%s)", actual, expected)
+    logging.info("YOLO %s actual inference device=%s (selected=%s)", label, actual, expected)
     if actual != expected and not (expected == "mps" and actual == "mps:0"):
         raise RuntimeError(f"YOLO device mismatch: selected {expected}, actual {actual}")
     return actual
@@ -1007,7 +936,7 @@ def diagnose_environment(args) -> int:
     failed = False
     for key in ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "LD_PRELOAD"):
         logging.info("%s=%s", key, os.environ.get(key, "<unset>"))
-    for name in ("torch", "torchvision", "mediapipe", "tensorflow", "ultralytics",
+    for name in ("torch", "torchvision", "ultralytics", "scenedetect", "lap",
                  "numpy", "opencv-python", "opencv-contrib-python", "opencv-python-headless"):
         try:
             logging.info("Package %s=%s", name, importlib.metadata.version(name))
@@ -1135,396 +1064,258 @@ def current_crop_size(
     return crop_w, crop_h
 
 
-class MediaPipeFaceHelper:
-    """Detects faces within cropped person bounding boxes using Tasks API or legacy fallback."""
-
-    def __init__(
-        self,
-        min_detection_confidence: float = 0.45,
-        model_path: Optional[str] = None,
-    ):
-        self.detector = None
-        self.is_tasks = False
-
-        if HAS_MP_TASKS and mp_vision is not None:
-            resolved_model = ensure_mediapipe_model(
-                model_name_or_path=model_path,
-                default_filename="blaze_face_short_range.tflite",
-                url=DEFAULT_FACE_MODEL_URL,
-            )
-            if resolved_model is not None:
-                try:
-                    base_options = mp_python.BaseOptions(
-                        model_asset_path=str(resolved_model),
-                        delegate=mp_python.BaseOptions.Delegate.CPU,
-                    )
-                    options = mp_vision.FaceDetectorOptions(
-                        base_options=base_options,
-                        min_detection_confidence=min_detection_confidence,
-                        running_mode=mp_vision.RunningMode.IMAGE,
-                    )
-                    self.detector = mp_vision.FaceDetector.create_from_options(options)
-                    self.is_tasks = True
-                    logging.info(
-                        "MediaPipe Tasks FaceDetector initialized: delegate=CPU model=%s",
-                        resolved_model,
-                    )
-                except Exception as exc:
-                    logging.warning(
-                        "MediaPipe Tasks FaceDetector failed to initialize: %s", exc,
-                        exc_info=True,
-                    )
-
-        if self.detector is None and legacy_mp_face is not None:
-            try:
-                self.detector = legacy_mp_face.FaceDetection(
-                    model_selection=0,
-                    min_detection_confidence=min_detection_confidence,
-                )
-                self.is_tasks = False
-                logging.info("Initialized legacy MediaPipe FaceDetection solution.")
-            except Exception as exc:
-                logging.warning("Legacy MediaPipe FaceDetection failed: %s", exc, exc_info=True)
-
-        if self.detector is None:
-            logging.warning(
-                "Face detection unavailable; running auto-reframe without face priority."
-            )
-
-    def detect_in_person_box(
-        self,
-        frame_bgr: np.ndarray,
-        person_box: tuple[int, int, int, int],
-        prepared: Optional[SharedPersonROI] = None,
-    ) -> Optional[tuple[int, int, int, int]]:
-        if self.detector is None:
-            return None
-
-        prepared = prepared or SharedPersonROI(frame_bgr, person_box)
-        rgb, x1, y1 = prepared.face_view()
-        roi = rgb
-        logging.debug("Face ROI x=%s y=%s width=%s height=%s backend=%s",
-                      x1, y1, rgb.shape[1], rgb.shape[0], "Tasks/CPU" if self.is_tasks else "legacy")
-        if rgb.size == 0:
-            return None
-
-        best = None
-        best_area = -1.0
-
-        if self.is_tasks:
-            try:
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                result = self.detector.detect(mp_image)
-                if not result.detections:
-                    return None
-
-                for det in result.detections:
-                    bbox = det.bounding_box
-                    px1 = max(0, int(bbox.origin_x))
-                    py1 = max(0, int(bbox.origin_y))
-                    pw = max(0, int(bbox.width))
-                    ph = max(0, int(bbox.height))
-                    px2 = min(roi.shape[1], px1 + pw)
-                    py2 = min(roi.shape[0], py1 + ph)
-
-                    area = max(1, px2 - px1) * max(1, py2 - py1)
-                    if area > best_area:
-                        best_area = area
-                        best = (x1 + px1, y1 + py1, x1 + px2, y1 + py2)
-            except Exception:
-                logging.warning("MediaPipe Tasks face inference failed for ROI %s", rgb.shape, exc_info=True)
-                return None
-        else:
-            try:
-                result = self.detector.process(rgb)
-                if not result.detections:
-                    return None
-
-                for det in result.detections:
-                    bbox = det.location_data.relative_bounding_box
-                    fx1 = max(0.0, bbox.xmin)
-                    fy1 = max(0.0, bbox.ymin)
-                    fw = max(0.0, bbox.width)
-                    fh = max(0.0, bbox.height)
-
-                    px1 = int(round(fx1 * roi.shape[1]))
-                    py1 = int(round(fy1 * roi.shape[0]))
-                    px2 = int(round((fx1 + fw) * roi.shape[1]))
-                    py2 = int(round((fy1 + fh) * roi.shape[0]))
-
-                    area = max(1, px2 - px1) * max(1, py2 - py1)
-                    if area > best_area:
-                        best_area = area
-                        best = (x1 + px1, y1 + py1, x1 + px2, y1 + py2)
-            except Exception:
-                logging.warning("Legacy face inference failed for ROI %s", rgb.shape, exc_info=True)
-                return None
-
-        return best
-
-    def close(self) -> None:
-        if self.detector is not None and hasattr(self.detector, "close"):
-            try:
-                self.detector.close()
-            except Exception:
-                logging.warning("Face detector cleanup failed", exc_info=True)
-
-POSE_LANDMARK_NAMES = {
-    0: "nose",
-    2: "left_eye",
-    5: "right_eye",
-    7: "left_ear",
-    8: "right_ear",
-    9: "mouth_left",
-    10: "mouth_right",
-    11: "left_shoulder",
-    12: "right_shoulder",
-    13: "left_elbow",
-    14: "right_elbow",
-    15: "left_wrist",
-    16: "right_wrist",
-    23: "left_hip",
-    24: "right_hip",
-    25: "left_knee",
-    26: "right_knee",
-    27: "left_ankle",
-    28: "right_ankle",
-    29: "left_heel",
-    30: "right_heel",
-    31: "left_foot_index",
-    32: "right_foot_index",
-}
+def box_iou(a, b) -> float:
+    intersection = max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(
+        0.0, min(a[3], b[3]) - max(a[1], b[1])
+    )
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    return intersection / max(area_a + area_b - intersection, 1.0)
 
 
-class MediaPipePoseHelper:
-    """Detects body landmarks within cropped person bounding boxes."""
+def pose_owner(box, person_boxes) -> Optional[int]:
+    """Match to segmentation rows, never to an independent pose tracker ID.
 
-    def __init__(
-        self,
-        min_detection_confidence: float = 0.35,
-        model_path: Optional[str] = None,
-    ):
-        self.detector = None
-        self.is_tasks = False
-        self.min_visibility = 0.35
+    Every visible person participates, including people excluded by cue-top-k.
+    Reject ambiguous overlap rather than borrowing a neighbour's skeleton.
+    """
+    scores = sorted(((box_iou(box, target), index)
+                     for index, target in person_boxes.items()), reverse=True)
+    if not scores or scores[0][0] < 0.30:
+        return None
+    if len(scores) > 1 and scores[0][0] - scores[1][0] < 0.10:
+        return None
+    return scores[0][1]
 
-        if HAS_MP_TASKS and mp_vision is not None:
-            resolved_model = ensure_mediapipe_model(
-                model_name_or_path=model_path,
-                default_filename="pose_landmarker_lite.task",
-                url=DEFAULT_POSE_MODEL_URL,
-            )
-            if resolved_model is not None:
-                try:
-                    base_options = mp_python.BaseOptions(
-                        model_asset_path=str(resolved_model),
-                        delegate=mp_python.BaseOptions.Delegate.CPU,
-                    )
-                    options = mp_vision.PoseLandmarkerOptions(
-                        base_options=base_options,
-                        running_mode=mp_vision.RunningMode.IMAGE,
-                        num_poses=1,
-                        min_pose_detection_confidence=min_detection_confidence,
-                        min_pose_presence_confidence=min_detection_confidence,
-                        min_tracking_confidence=0.4,
-                        output_segmentation_masks=False,
-                    )
-                    self.detector = mp_vision.PoseLandmarker.create_from_options(
-                        options
-                    )
-                    self.is_tasks = True
-                    logging.info(
-                        "MediaPipe Tasks PoseLandmarker initialized: delegate=CPU model=%s",
-                        resolved_model,
-                    )
-                    logging.info(
-                        "MediaPipe pose projection uses the packaged graph. Its "
-                        "NORM_RECT/IMAGE_DIMENSIONS warning is independent of CUDA; "
-                        "native warnings remain visible."
-                    )
-                except Exception as exc:
-                    logging.warning(
-                        "MediaPipe Tasks PoseLandmarker failed to initialize: %s", exc,
-                        exc_info=True,
-                    )
 
-        if self.detector is None and legacy_mp_pose is not None:
-            try:
-                self.detector = legacy_mp_pose.Pose(
-                    static_image_mode=True,
-                    model_complexity=1,
-                    enable_segmentation=False,
-                    min_detection_confidence=min_detection_confidence,
-                    min_tracking_confidence=0.4,
-                )
-                self.is_tasks = False
-                logging.info("Initialized legacy MediaPipe Pose solution.")
-            except Exception as exc:
-                logging.warning("Legacy MediaPipe Pose failed: %s", exc, exc_info=True)
+def pose_cues(keypoints, person_box, frame_shape, min_confidence) -> Optional[dict]:
+    """Convert COCO-17 pixel coordinates to conservative framing cues.
 
-        if self.detector is None:
-            logging.warning(
-                "Pose detection unavailable; composition will fall back to mask framing."
-            )
+    Head bounds are estimates, not face detections. Keep the segmentation box's
+    bottom even when ankles are visible: COCO has neither heels nor toes.
+    """
+    points = np.asarray(keypoints, dtype=np.float64)
+    if points.shape != (17, 3):
+        raise ValueError(f"Expected COCO keypoints (17, 3), got {points.shape}")
+    height, width = frame_shape[:2]
+    x1, y1, x2, y2 = person_box
+    pw, ph = max(1.0, x2 - x1), max(1.0, y2 - y1)
+    valid = (np.isfinite(points).all(axis=1) & (points[:, 2] >= min_confidence)
+             & (points[:, 0] >= max(0, x1 - pw * 0.12))
+             & (points[:, 0] < min(width, x2 + pw * 0.12))
+             & (points[:, 1] >= max(0, y1 - ph * 0.12))
+             & (points[:, 1] < min(height, y2 + ph * 0.12)))
+    if valid.sum() < 2:
+        return None
 
-    def detect_in_person_box(
-        self,
-        frame_bgr: np.ndarray,
-        person_box: tuple[int, int, int, int],
-        pad_ratio: float = 0.12,
-        prepared: Optional[SharedPersonROI] = None,
-    ) -> Optional[dict]:
-        if self.detector is None:
-            return None
+    def midpoint(indices):
+        selected = [index for index in indices if valid[index]]
+        return points[selected, :2].mean(axis=0) if selected else None
 
-        prepared = prepared or SharedPersonROI(frame_bgr, person_box, pad_ratio)
-        rgb, rx1, ry1 = prepared.pose_view()
-        roi = rgb
-        logging.debug("Pose ROI x=%s y=%s width=%s height=%s backend=%s",
-                      rx1, ry1, rgb.shape[1], rgb.shape[0], "Tasks/CPU" if self.is_tasks else "legacy")
-        if rgb.size == 0:
-            return None
-        try:
-            if self.is_tasks:
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                result = self.detector.detect(mp_image)
-                if not result.pose_landmarks:
-                    return None
-                landmarks_list = result.pose_landmarks[0]
-            else:
-                result = self.detector.process(rgb)
-                if not result.pose_landmarks:
-                    return None
-                landmarks_list = result.pose_landmarks.landmark
-        except Exception:
-            logging.warning("Pose inference failed for ROI %s", rgb.shape, exc_info=True)
-            return None
+    eyes = midpoint((1, 2))
+    anchor = eyes if eyes is not None else (points[0, :2] if valid[0] else None)
+    shoulders, hips = midpoint((5, 6)), midpoint((11, 12))
+    shoulder_span = abs(points[5, 0] - points[6, 0]) if valid[5] and valid[6] else None
+    facial = points[:5, :2][valid[:5]]
+    head_box = None
+    if len(facial) >= 2:
+        center = anchor if anchor is not None else facial.mean(axis=0)
+        estimates = [float(np.ptp(facial[:, 0])) * 1.5, pw * 0.18]
+        if valid[1] and valid[2]:
+            estimates.append(float(np.linalg.norm(points[1, :2] - points[2, :2])) * 3.0)
+        if valid[3] and valid[4]:
+            estimates.append(float(np.linalg.norm(points[3, :2] - points[4, :2])) * 1.2)
+        if shoulder_span is not None:
+            estimates.append(float(shoulder_span) * 0.38)
+        hw = min(max(estimates), pw * 0.75, ph * 0.65)
+        hh = hw * 1.25
+        head_box = (max(0.0, float(center[0] - hw / 2)),
+                    max(0.0, float(center[1] - hh * 0.45)),
+                    min(float(width), float(center[0] + hw / 2)),
+                    min(float(height), float(center[1] + hh * 0.55)))
 
-        roi_h, roi_w = roi.shape[:2]
-        points: dict[str, tuple[float, float, float]] = {}
-        for idx, lm in enumerate(landmarks_list):
-            name = POSE_LANDMARK_NAMES.get(idx)
-            if name is None:
+    has_body = int(valid[5:].sum()) >= 2 and (shoulders is not None or hips is not None)
+    if not has_body and head_box is None:
+        return None
+    body_center = (shoulders + hips) / 2 if shoulders is not None and hips is not None else (
+        shoulders if shoulders is not None else hips
+    )
+    if body_center is None:
+        body_center = anchor
+    selected = points[valid, :2]
+    return {
+        "head_box": head_box,
+        "has_pose": bool(has_body),
+        "eye_y": float(anchor[1]) if anchor is not None else None,
+        "body_cx": float(body_center[0]) if body_center is not None else None,
+        "shoulder_y": float(shoulders[1]) if shoulders is not None else None,
+        "shoulder_span": float(shoulder_span) if shoulder_span is not None else None,
+        "body_top_y": float(min(y1, selected[:, 1].min(),
+                                head_box[1] if head_box else y1)) if has_body else None,
+        "body_bottom_y": float(max(y2, selected[:, 1].max())) if has_body else None,
+        "body_min_x": float(min(x1, selected[:, 0].min())) if has_body else None,
+        "body_max_x": float(max(x2, selected[:, 0].max())) if has_body else None,
+        "body_bottom_confident": bool(valid[15] and valid[16]),
+    }
+
+
+class YOLOPoseHelper:
+    """One persistent COCO-17 model, batched BGR ROIs, no separate face model."""
+
+    def __init__(self, args):
+        path = Path(args.pose_model)
+        if path.suffix.lower() != ".pt":
+            raise ValueError("--pose-model requires a COCO-17 YOLO .pt checkpoint")
+        if args.pose_model != "yolo26n-pose.pt" and not path.is_file():
+            raise FileNotFoundError(f"Pose checkpoint not found: {path}")
+        self.model = YOLO(args.pose_model)
+        if self.model.task != "pose":
+            raise ValueError(f"Expected pose model, got task={self.model.task!r}")
+        shape = getattr(self.model.model.model[-1], "kpt_shape", None)
+        if shape is None or tuple(shape) != (17, 3):
+            raise ValueError(f"Pose checkpoint must use COCO-17 (17, 3), got {shape}")
+        if self.model.names != {0: "person"}:
+            raise ValueError("Pose checkpoint must describe COCO person keypoints")
+        self.device = args.yolo_device
+        self.imgsz, self.conf = args.pose_imgsz, args.pose_conf
+        self.keypoint_conf, self.batch_size = args.keypoint_conf, args.pose_batch_size
+        self.actual_device = None
+        self.rois_inferred = self.rois_matched = 0
+        logging.info("YOLO pose loaded: model=%s device=%s imgsz=%s batch_size=%s "
+                     "detection_conf=%s keypoint_conf=%s", args.pose_model, self.device,
+                     self.imgsz, self.batch_size, self.conf, self.keypoint_conf)
+
+    def detect_many(self, frame, requests, person_boxes):
+        """requests: (segmentation row index, person box, track ID)."""
+        output = {index: None for index, _, _ in requests}
+        height, width = frame.shape[:2]
+        prepared = []
+        for index, box, track_id in requests:
+            x1, y1, x2, y2 = box
+            px, py = (x2 - x1) * 0.12, (y2 - y1) * 0.12
+            left, top = max(0, math.floor(x1 - px)), max(0, math.floor(y1 - py))
+            right, bottom = min(width, math.ceil(x2 + px)), min(height, math.ceil(y2 + py))
+            if left >= right or top >= bottom:
                 continue
-            px = rx1 + lm.x * roi_w
-            py = ry1 + lm.y * roi_h
-            vis_val = getattr(lm, "visibility", None)
-            vis = float(vis_val) if vis_val is not None else 1.0
-            points[name] = (px, py, vis)
-
-        if not points:
-            return None
-
-        def visible(name: str) -> Optional[tuple[float, float]]:
-            p = points.get(name)
-            if p is None or p[2] < self.min_visibility:
-                return None
-            return p[0], p[1]
-
-        left_eye = visible("left_eye")
-        right_eye = visible("right_eye")
-        nose = visible("nose")
-        if left_eye and right_eye:
-            eye_y = (left_eye[1] + right_eye[1]) / 2
-            eye_cx = (left_eye[0] + right_eye[0]) / 2
-        elif nose is not None:
-            eye_y = nose[1]
-            eye_cx = nose[0]
-        else:
-            eye_y = None
-            eye_cx = None
-
-        mouth_l = visible("mouth_left")
-        mouth_r = visible("mouth_right")
-        chin_y = max(mouth_l[1], mouth_r[1]) if (mouth_l and mouth_r) else None
-
-        left_sh = visible("left_shoulder")
-        right_sh = visible("right_shoulder")
-        if left_sh and right_sh:
-            shoulder_span = abs(left_sh[0] - right_sh[0])
-            shoulder_cx = (left_sh[0] + right_sh[0]) / 2
-            shoulder_y = (left_sh[1] + right_sh[1]) / 2
-        else:
-            shoulder_span = None
-            shoulder_cx = None
-            shoulder_y = None
-
-        left_hip = visible("left_hip")
-        right_hip = visible("right_hip")
-        if left_hip and right_hip:
-            hip_cx = (left_hip[0] + right_hip[0]) / 2
-            hip_y = (left_hip[1] + right_hip[1]) / 2
-        else:
-            hip_cx = None
-            hip_y = None
-
-        lower_body_names = [
-            "left_knee",
-            "right_knee",
-            "left_ankle",
-            "right_ankle",
-            "left_heel",
-            "right_heel",
-            "left_foot_index",
-            "right_foot_index",
-        ]
-        lower_body_visible = [
-            visible(name) for name in lower_body_names if visible(name) is not None
-        ]
-
-        visible_ys = [p[1] for p in points.values() if p[2] >= self.min_visibility]
-        visible_xs = [p[0] for p in points.values() if p[2] >= self.min_visibility]
-        if not visible_ys or not visible_xs:
-            return None
-
-        body_top_candidates = [min(visible_ys)]
-        if eye_y is not None:
-            body_top_candidates.append(eye_y)
-
-        ear_y_values = [
-            points[n][1]
-            for n in ("left_ear", "right_ear")
-            if n in points and points[n][2] >= self.min_visibility
-        ]
-        if ear_y_values:
-            body_top_candidates.append(min(ear_y_values))
-
-        body_top_y = min(body_top_candidates)
-        body_bottom_y = max(visible_ys)
-        body_bottom_confident = len(lower_body_visible) >= 2
-
-        if shoulder_cx is not None and hip_cx is not None:
-            body_cx = (shoulder_cx + hip_cx) / 2
-        elif shoulder_cx is not None:
-            body_cx = shoulder_cx
-        elif hip_cx is not None:
-            body_cx = hip_cx
-        elif eye_cx is not None:
-            body_cx = eye_cx
-        else:
-            body_cx = None
-
-        return {
-            "eye_y": eye_y,
-            "eye_cx": eye_cx,
-            "chin_y": chin_y,
-            "shoulder_y": shoulder_y,
-            "shoulder_span": shoulder_span,
-            "hip_y": hip_y,
-            "body_top_y": body_top_y,
-            "body_bottom_y": body_bottom_y,
-            "body_bottom_confident": body_bottom_confident,
-            "body_cx": body_cx,
-            "body_min_x": min(visible_xs),
-            "body_max_x": max(visible_xs),
-        }
-
-    def close(self) -> None:
-        if self.detector is not None and hasattr(self.detector, "close"):
+            image = np.ascontiguousarray(frame[top:bottom, left:right])
+            prepared.append((index, box, track_id, left, top, image))
+            logging.debug("Pose ROI track=%s x=%s y=%s width=%s height=%s BGR device=%s",
+                          track_id, left, top, right - left, bottom - top, self.device)
+        for start in range(0, len(prepared), self.batch_size):
+            batch = prepared[start:start + self.batch_size]
             try:
-                self.detector.close()
+                results = self.model.predict(source=[item[5] for item in batch],
+                                             device=self.device, imgsz=self.imgsz,
+                                             conf=self.conf, verbose=False)
+                if self.actual_device is None:
+                    self.actual_device = verify_yolo_device(self.model, self.device, "pose")
+                if len(results) != len(batch):
+                    raise RuntimeError("Pose batch result count does not match ROI count")
+                self.rois_inferred += len(batch)
+                for item, result in zip(batch, results):
+                    index, box, track_id, left, top, _ = item
+                    if result.boxes is None or len(result.boxes) == 0:
+                        continue
+                    if result.keypoints is None:
+                        raise ValueError("Pose model returned boxes without keypoints")
+                    boxes = result.boxes.xyxy.detach().cpu().numpy()
+                    points = result.keypoints.data.detach().cpu().numpy()
+                    if points.shape != (len(boxes), 17, 3):
+                        raise ValueError(f"Invalid pose output shape: {points.shape}")
+                    matches = []
+                    for row, local_box in enumerate(boxes):
+                        global_box = local_box + np.array([left, top, left, top])
+                        if not np.isfinite(global_box).all() or pose_owner(global_box, person_boxes) != index:
+                            continue
+                        matches.append((box_iou(global_box, box), row))
+                    matches.sort(reverse=True)
+                    if not matches or (len(matches) > 1 and matches[0][0] - matches[1][0] < 0.10):
+                        logging.debug("Pose association missing/ambiguous for track=%s", track_id)
+                        continue
+                    keypoints = points[matches[0][1]].copy()
+                    keypoints[:, :2] += np.array([left, top])
+                    output[index] = pose_cues(keypoints, box, frame.shape, self.keypoint_conf)
+                    self.rois_matched += 1
             except Exception:
-                logging.warning("Pose detector cleanup failed", exc_info=True)
+                logging.exception("YOLO pose inference failed: tracks=%s device=%s",
+                                  [item[2] for item in batch], self.device)
+                raise
+        return output
+
+    def close(self):
+        self.model = None
+
+
+class PoseCueCache:
+    """Batch expired tracks and remap cached head/body cues; never retain tensors."""
+
+    def __init__(self, helper, interval, fps):
+        self.helper = helper
+        self.interval = max(1, round(interval * fps))
+        self.cache = {}
+        self.cache_hits = 0
+
+    def clear(self):
+        self.cache.clear()
+
+    def close(self):
+        self.clear()
+        self.helper.close()
+
+    @staticmethod
+    def remap(result, old, box):
+        if result is None:
+            return None
+        sx, sy = (box[2] - box[0]) / (old[2] - old[0]), (box[3] - box[1]) / (old[3] - old[1])
+        def x(v):
+            return box[0] + (v - old[0]) * sx
+        def y(v):
+            return box[1] + (v - old[1]) * sy
+        mapped = dict(result)
+        for key, value in result.items():
+            if value is None or isinstance(value, bool):
+                continue
+            if key == "head_box":
+                mapped[key] = (x(value[0]), y(value[1]), x(value[2]), y(value[3]))
+            elif key.endswith("_y"):
+                mapped[key] = y(value)
+            elif key.endswith("_x") or key.endswith("_cx"):
+                mapped[key] = x(value)
+            elif key == "shoulder_span":
+                mapped[key] = value * sx
+        return mapped
+
+    def get_many(self, frame, requests, person_boxes, frame_idx):
+        output, pending = {}, []
+        self.cache = {key: value for key, value in self.cache.items()
+                      if 0 <= frame_idx - value[0] < max(2, self.interval * 2)}
+        for index, box, track_id in requests:
+            previous = self.cache.get(track_id) if track_id is not None else None
+            crowded = any(other != index and box_iou(box, other_box) > 0.35
+                          for other, other_box in person_boxes.items())
+            if previous is not None and not crowded:
+                at, old, result = previous
+                ow, oh = max(1.0, old[2] - old[0]), max(1.0, old[3] - old[1])
+                sx, sy = (box[2] - box[0]) / ow, (box[3] - box[1]) / oh
+                stable = (0.8 <= sx <= 1.25 and 0.8 <= sy <= 1.25
+                          and abs(box[0] - old[0]) < ow * 0.2
+                          and abs(box[1] - old[1]) < oh * 0.2)
+                if 0 <= frame_idx - at < self.interval and stable:
+                    output[index] = self.remap(result, old, box)
+                    self.cache_hits += 1
+                    continue
+            pending.append((index, box, track_id))
+        if pending:
+            fresh = self.helper.detect_many(frame, pending, person_boxes)
+            output.update(fresh)
+            for index, box, track_id in pending:
+                if track_id is not None:
+                    self.cache[track_id] = (frame_idx, box, fresh[index])
+            while len(self.cache) > 128:
+                self.cache.pop(next(iter(self.cache)))
+        return output
+
+
 
 def detect_scenes(
     video_path: str,
@@ -1658,8 +1449,7 @@ def build_candidates(
     ranking_model: SubjectRankingModel,
     allowed_class_ids: list[int],
     class_names: dict[int, str],
-    face_helper: MediaPipeFaceHelper,
-    pose_helper: Optional[MediaPipePoseHelper],
+    pose_helper: Optional[PoseCueCache],
     state: CameraState,
     fps: float,
     frame_idx: int,
@@ -1690,6 +1480,10 @@ def build_candidates(
             x1, y1, x2, y2 = map(float, row[:4])
             track_id = int(row[4]) if len(row) == 7 else None
 
+            if not all(math.isfinite(v) for v in (conf, x1, y1, x2, y2)) or x2 <= x1 or y2 <= y1:
+                logging.warning("Ignoring invalid detection box at row=%s", i)
+                continue
+
             parsed_rows.append((i, cls_id, conf, x1, y1, x2, y2, track_id))
             if cue_top_k and cls_id == CLASS_IDS["person"]:
                 score = conf * max(0.0, x2 - x1) * max(0.0, y2 - y1)
@@ -1713,6 +1507,15 @@ def build_candidates(
     else:
         eligible = set(indices)
 
+    person_boxes = {i: (x1, y1, x2, y2)
+                    for i, cls_id, _, x1, y1, x2, y2, _ in parsed_rows
+                    if cls_id == CLASS_IDS["person"]}
+    requests = [(i, person_boxes[i], track_id)
+                for i, cls_id, _, _, _, _, _, track_id in parsed_rows
+                if cls_id == CLASS_IDS["person"] and i in eligible]
+    cues = (pose_helper.get_many(frame, requests, person_boxes, frame_idx)
+            if pose_helper is not None else {})
+
     for i, cls_id, conf, x1, y1, x2, y2, track_id in parsed_rows:
         try:
             width = max(1.0, x2 - x1)
@@ -1731,30 +1534,12 @@ def build_candidates(
             salient_box = extract_saliency_region(
                 saliency_map, (int(x1), int(y1), int(x2), int(y2)), frame_shape=(h, w)
             )
-            face_box = None
-            pose_data: Optional[dict] = None
+            pose_data = cues.get(i)
+            head_box = pose_data.get("head_box") if pose_data else None
 
             if cls_name == "person":
-                if i in eligible:
-                    shared_roi = SharedPersonROI(
-                        frame, (int(x1), int(y1), int(x2), int(y2))
-                    )
-                    if pose_helper is not None:
-                        pose_data = pose_helper.detect_in_person_box(
-                            frame,
-                            (int(x1), int(y1), int(x2), int(y2)),
-                            track_id,
-                            prepared=shared_roi,
-                        )
-                    face_box = face_helper.detect_in_person_box(
-                        frame,
-                        (int(x1), int(y1), int(x2), int(y2)),
-                        track_id,
-                        prepared=shared_roi,
-                    )
-
-                if face_box is not None:
-                    fx1, fy1, fx2, fy2 = face_box
+                if head_box is not None:
+                    fx1, fy1, fx2, fy2 = head_box
                     framing_cx = (fx1 + fx2) / 2.0
                     framing_cy = fy1 + (fy2 - fy1) * 0.42
                 elif pose_data is not None and pose_data.get("body_cx") is not None:
@@ -1813,8 +1598,8 @@ def build_candidates(
                 frame_area=frame_area,
                 dist_center=dist_center,
                 frame_diag=frame_diag,
-                has_face=face_box is not None,
-                has_pose=pose_data is not None,
+                has_head=head_box is not None,
+                has_pose=bool(pose_data and pose_data.get("has_pose")),
                 saliency_confidence=(
                     salient_box[6] if salient_box is not None else 0.0
                 ),
@@ -1824,7 +1609,6 @@ def build_candidates(
             )
 
             eye_y_val = None
-            chin_y_val = None
             body_top_val = None
             body_bottom_val = None
             body_cx_val = None
@@ -1834,7 +1618,6 @@ def build_candidates(
             body_max_x_val = None
             if pose_data is not None:
                 eye_y_val = pose_data.get("eye_y")
-                chin_y_val = pose_data.get("chin_y")
                 body_top_val = pose_data.get("body_top_y")
                 body_bottom_val = pose_data.get("body_bottom_y")
                 body_cx_val = pose_data.get("body_cx")
@@ -1866,10 +1649,10 @@ def build_candidates(
                     mask_top_y=mask_top_y,
                     framing_cx=framing_cx,
                     framing_cy=framing_cy,
-                    face_box=face_box,
+                    head_box=head_box,
+                    has_pose=bool(pose_data and pose_data.get("has_pose")),
                     score=score,
                     eye_y=eye_y_val,
-                    chin_y=chin_y_val,
                     body_top_y=body_top_val,
                     body_bottom_y=body_bottom_val,
                     body_cx=body_cx_val,
@@ -1998,14 +1781,14 @@ def derive_candidate_focus_bounds(
             bottom += height * 0.08
         else:
             bottom += height * 0.18
-    elif subject.cls_name == "person" and subject.face_box is not None:
-        fx1, fy1, fx2, fy2 = subject.face_box
-        face_w = max(1.0, fx2 - fx1)
-        face_h = max(1.0, fy2 - fy1)
-        left = min(subject.x1, fx1 - face_w * 1.15)
-        right = max(subject.x2, fx2 + face_w * 1.15)
-        top = fy1 - face_h * 1.45
-        bottom = max(subject.y2, fy2 + face_h * 4.0)
+    elif subject.cls_name == "person" and subject.head_box is not None:
+        fx1, fy1, fx2, fy2 = subject.head_box
+        head_w = max(1.0, fx2 - fx1)
+        head_h = max(1.0, fy2 - fy1)
+        left = min(subject.x1, fx1 - head_w * 0.15)
+        right = max(subject.x2, fx2 + head_w * 0.15)
+        top = min(subject.y1, fy1 - head_h * 0.15)
+        bottom = subject.y2 + subject.height * 0.08
     else:
         left = subject.x1
         right = subject.x2
@@ -2106,9 +1889,9 @@ def build_single_subject_observation(
     anchor_y = None
     if subject.eye_y is not None:
         anchor_y = subject.eye_y
-    elif subject.face_box is not None:
+    elif subject.head_box is not None:
         anchor_y = (
-            subject.face_box[1] + (subject.face_box[3] - subject.face_box[1]) * 0.45
+            subject.head_box[1] + (subject.head_box[3] - subject.head_box[1]) * 0.45
         )
 
     return compute_observation_from_bounds(
@@ -2351,8 +2134,8 @@ def draw_debug(
         vy2 = int((candidate.y2 - top) * scale_y)
         cv2.rectangle(reframed_crop, (vx1, vy1), (vx2, vy2), color, thickness)
 
-        if candidate.face_box is not None:
-            fx1, fy1, fx2, fy2 = candidate.face_box
+        if candidate.head_box is not None:
+            fx1, fy1, fx2, fy2 = candidate.head_box
             vfx1 = int((fx1 - left) * scale_x)
             vfy1 = int((fy1 - top) * scale_y)
             vfx2 = int((fx2 - left) * scale_x)
@@ -2705,27 +2488,14 @@ def process_video(args: argparse.Namespace) -> None:
         scene_start_set = set()
         inline_scene = InlineSceneDetector(args.min_scene_len, args.scene_threshold)
 
-    for model_file in (args.face_model, args.pose_model):
-        if model_file and not Path(model_file).is_file():
-            raise FileNotFoundError(f"Explicit MediaPipe model not found: {model_file}")
     model = YOLO(args.seg_model)
+    if model.task != "segment":
+        raise ValueError(f"--seg-model requires a segmentation model, got {model.task!r}")
     class_names = model.names
-    face_helper = MediaPipeFaceHelper(
-        min_detection_confidence=0.45,
-        model_path=args.face_model,
-    )
-    pose_helper = MediaPipePoseHelper(
-        min_detection_confidence=0.35,
-        model_path=args.pose_model,
-    )
     saliency_helper = build_saliency_helper(args)
     ranking_model = SubjectRankingModel()
-    if pose_helper.detector is None:
-        pose_helper = None
-
-    face_helper = CueCache(face_helper, args.cue_interval, fps)
-    if pose_helper is not None:
-        pose_helper = CueCache(pose_helper, args.cue_interval, fps)
+    pose_helper = (PoseCueCache(YOLOPoseHelper(args), args.cue_interval, fps)
+                   if CLASS_IDS["person"] in allowed_class_ids else None)
     try:
         with (
             tempfile.TemporaryDirectory(dir=args.temp_dir) as tmpdir,
@@ -2784,7 +2554,8 @@ def process_video(args: argparse.Namespace) -> None:
                 "scene_resets": 0,
                 "subject_switches": 0,
                 "frames_with_subject": 0,
-                "frames_with_face": 0,
+                "frames_with_head_cues": 0,
+                "frames_with_pose": 0,
                 "frames_with_two_person": 0,
             }
 
@@ -2805,7 +2576,6 @@ def process_video(args: argparse.Namespace) -> None:
                     predictor = getattr(model, "predictor", None)
                     for tracker in getattr(predictor, "trackers", []):
                         tracker.reset()
-                    face_helper.clear()
                     if pose_helper is not None:
                         pose_helper.clear()
                 result = model.track(
@@ -2829,9 +2599,6 @@ def process_video(args: argparse.Namespace) -> None:
                     stats["scene_resets"] += 1
                     last_subject_key = None
 
-                face_helper.frame_idx = frame_idx
-                if pose_helper is not None:
-                    pose_helper.frame_idx = frame_idx
                 saliency_map = saliency_helper.compute_map(frame)
                 candidates = build_candidates(
                     result=result,
@@ -2840,7 +2607,6 @@ def process_video(args: argparse.Namespace) -> None:
                     ranking_model=ranking_model,
                     allowed_class_ids=allowed_class_ids,
                     class_names=class_names,
-                    face_helper=face_helper,
                     pose_helper=pose_helper,
                     state=state,
                     fps=fps,
@@ -2919,8 +2685,10 @@ def process_video(args: argparse.Namespace) -> None:
                     last_subject_key = current_subject_key
 
                     stats["frames_with_subject"] += 1
-                    if subject.face_box is not None:
-                        stats["frames_with_face"] += 1
+                    if subject.head_box is not None:
+                        stats["frames_with_head_cues"] += 1
+                    if subject.has_pose:
+                        stats["frames_with_pose"] += 1
 
                     if (
                         args.lock_first_subject
@@ -3154,7 +2922,8 @@ def process_video(args: argparse.Namespace) -> None:
                 "frames_processed": stats["frames_processed"],
                 "scene_resets": stats["scene_resets"],
                 "frames_with_subject": stats["frames_with_subject"],
-                "frames_with_face": stats["frames_with_face"],
+                "frames_with_head_cues": stats["frames_with_head_cues"],
+                "frames_with_pose": stats["frames_with_pose"],
                 "frames_with_two_person": stats["frames_with_two_person"],
                 "subject_switches": stats["subject_switches"],
                 "output_width": args.output_width,
@@ -3163,6 +2932,11 @@ def process_video(args: argparse.Namespace) -> None:
                 "encode_mode": args.encode_mode,
                 "seg_model": args.seg_model,
                 "yolo_device": actual_yolo_device,
+                "pose_model": args.pose_model if pose_helper else None,
+                "pose_device": pose_helper.helper.actual_device if pose_helper else None,
+                "pose_rois_inferred": pose_helper.helper.rois_inferred if pose_helper else 0,
+                "pose_rois_matched": pose_helper.helper.rois_matched if pose_helper else 0,
+                "pose_cache_hits": pose_helper.cache_hits if pose_helper else 0,
                 "video_encoder_requested": args.video_encoder,
                 "video_encoder_actual": actual_encoder,
                 "scene_method": args.scene_method,
@@ -3172,7 +2946,6 @@ def process_video(args: argparse.Namespace) -> None:
             summary.update({f"saliency_{k}": v for k, v in saliency_telemetry.items()})
             logging.info("Summary: %s", json.dumps(summary, ensure_ascii=False))
     finally:
-        face_helper.close()
         if pose_helper is not None:
             pose_helper.close()
 
@@ -3202,73 +2975,6 @@ def pair_fits(pair, base_w: int, base_h: int, zoom: float) -> bool:
         width + 2 * max(width * 0.12, 16) <= base_w / zoom
         and height + 2 * max(height * 0.16, 20) <= base_h / zoom
     )
-
-class CueCache:
-    """Cache per track, remapping cached coordinates to the current person box."""
-
-    def __init__(self, helper, interval: float, fps: float):
-        self.helper = helper
-        self.interval = max(1, round(interval * fps))
-        self.frame_idx = 0
-        self.cache = {}
-
-    def clear(self):
-        self.cache.clear()
-
-    def close(self):
-        self.helper.close()
-
-    def detect_in_person_box(self, frame, box, track_id=None, prepared=None):
-        previous = self.cache.get(track_id) if track_id is not None else None
-        if previous is not None:
-            at, old, result = previous
-            ow, oh = max(1, old[2] - old[0]), max(1, old[3] - old[1])
-            sx, sy = (box[2] - box[0]) / ow, (box[3] - box[1]) / oh
-            stable = (
-                0.8 <= sx <= 1.25
-                and 0.8 <= sy <= 1.25
-                and abs(box[0] - old[0]) < ow * 0.2
-                and abs(box[1] - old[1]) < oh * 0.2
-            )
-            if self.frame_idx - at < self.interval and stable and result is not None:
-
-                def x(v):
-                    return box[0] + (v - old[0]) * sx
-
-                def y(v):
-                    return box[1] + (v - old[1]) * sy
-
-                if isinstance(result, tuple):
-                    return tuple(
-                        round(v)
-                        for v in (
-                            x(result[0]),
-                            y(result[1]),
-                            x(result[2]),
-                            y(result[3]),
-                        )
-                    )
-                mapped = dict(result)
-                for key, value in result.items():
-                    if value is None or isinstance(value, bool):
-                        continue
-                    if key.endswith("_y"):
-                        mapped[key] = y(value)
-                    elif key.endswith("_x") or key.endswith("_cx"):
-                        mapped[key] = x(value)
-                    elif key == "shoulder_span":
-                        mapped[key] = value * sx
-                return mapped
-        result = self.helper.detect_in_person_box(frame, box, prepared=prepared)
-        if track_id is not None:
-            self.cache[track_id] = (self.frame_idx, box, result)
-        if len(self.cache) > 128:
-            self.cache = {
-                k: v
-                for k, v in self.cache.items()
-                if self.frame_idx - v[0] <= self.interval * 2
-            }
-        return result
 
 class LosslessWriter:
     """BGR frames -> lossless FFV1 temporary file; final encode can safely retry."""
@@ -3421,44 +3127,6 @@ def mask_statistics(masks, indices: list[int], frame_shape: tuple[int, int]) -> 
                     float(binary.any(axis=1).argmax()) * sy,
                 )
     return output
-
-class SharedPersonROI:
-    """Lazy single BGR->RGB conversion shared by face and pose on a person."""
-
-    def __init__(self, frame, box, pad_ratio=0.12):
-        self.frame, self.box, self.pad_ratio = frame, box, pad_ratio
-        self.rgb = None
-
-    def ensure(self):
-        if self.rgb is not None:
-            return
-        h, w = self.frame.shape[:2]
-        x1, y1, x2, y2 = self.box
-        x1, y1 = int(clamp(x1, 0, w - 1)), int(clamp(y1, 0, h - 1))
-        x2, y2 = int(clamp(x2, x1 + 1, w)), int(clamp(y2, y1 + 1, h))
-        self.box = x1, y1, x2, y2
-        px, py = round((x2 - x1) * self.pad_ratio), round((y2 - y1) * self.pad_ratio)
-        self.x, self.y = max(0, x1 - px), max(0, y1 - py)
-        self.right, self.bottom = min(w, x2 + px), min(h, y2 + py)
-        self.rgb = cv2.cvtColor(
-            self.frame[self.y : self.bottom, self.x : self.right], cv2.COLOR_BGR2RGB
-        )
-
-    def face_view(self):
-        self.ensure()
-        x1, y1, x2, y2 = self.box
-        upper_h = max(1, int((y2 - y1) * 0.65))
-        return (
-            np.ascontiguousarray(
-                self.rgb[y1 - self.y : y1 - self.y + upper_h, x1 - self.x : x2 - self.x]
-            ),
-            x1,
-            y1,
-        )
-
-    def pose_view(self):
-        self.ensure()
-        return self.rgb, self.x, self.y
 
 class SampledSaliency:
     """Low-res refresh plus sparse optical-flow translation and EMA."""

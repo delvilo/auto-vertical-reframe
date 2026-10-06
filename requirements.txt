@@ -1,0 +1,12 @@
+# Python 3.11+; Python packages only. FFmpeg/NVIDIA drivers are external.
+# YOLO API version from the working Colab environment; no export extras needed.
+ultralytics==8.4.173
+scenedetect==0.7.1
+lap==0.5.13
+scipy>=1.14.1,<2
+numpy>=2.1.3,<3
+# Keep only one cv2 provider. install_colab.py removes overlapping distributions.
+opencv-python>=4.11,<5,!=4.13.0.90
+# Keep a compatible installed CUDA build; do not use pip --upgrade on Colab.
+torch>=2.6,<3
+torchvision>=0.21,<1

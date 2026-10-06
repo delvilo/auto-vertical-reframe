@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-for module in ("cv2", "scenedetect", "ultralytics", "mediapipe"):
+for module in ("cv2", "scenedetect", "ultralytics"):
     try:
         __import__(module)
     except ImportError:
@@ -61,25 +61,6 @@ class BackendTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             arguments("--max-frames", "0")
 
-    def test_face_inference_exception_is_visible(self):
-        helper = object.__new__(app.MediaPipeFaceHelper)
-        helper.is_tasks = True
-        helper.detector = MagicMock()
-        helper.detector.detect.side_effect = RuntimeError("face inference failed")
-        prepared = SimpleNamespace(face_view=lambda: (np.zeros((20, 10, 3), np.uint8), 0, 0))
-        with patch.object(app, "mp", MagicMock()), self.assertLogs(level="WARNING") as logs:
-            self.assertIsNone(helper.detect_in_person_box(None, None, prepared))
-        self.assertIn("RuntimeError: face inference failed", "\n".join(logs.output))
-
-    def test_pose_inference_exception_is_visible(self):
-        helper = object.__new__(app.MediaPipePoseHelper)
-        helper.is_tasks = True
-        helper.detector = MagicMock()
-        helper.detector.detect.side_effect = RuntimeError("pose inference failed")
-        prepared = SimpleNamespace(pose_view=lambda: (np.zeros((30, 10, 3), np.uint8), 0, 0))
-        with patch.object(app, "mp", MagicMock()), self.assertLogs(level="WARNING") as logs:
-            self.assertIsNone(helper.detect_in_person_box(None, None, prepared=prepared))
-        self.assertIn("RuntimeError: pose inference failed", "\n".join(logs.output))
 
 
 class ProcessOutputTests(unittest.TestCase):
