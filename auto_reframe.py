@@ -9,13 +9,20 @@ two-person boundary fitting, and live encoder preflight into a single-pass pipel
 from __future__ import annotations
 
 import argparse
+import codecs
+import hashlib
+import importlib.metadata
 import json
 import logging
 import math
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
+import traceback
 import urllib.request
 from collections import deque
 from contextlib import ExitStack, nullcontext
@@ -23,12 +30,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+# Native loaders run during imports, before argparse or Python logging is ready.
+if __name__ == "__main__" and "--native-debug" in sys.argv[1:]:
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+    modules = [entry for entry in os.environ.get("TF_CPP_VMODULE", "").split(",")
+               if entry and not entry.startswith("dso_loader=")]
+    os.environ["TF_CPP_VMODULE"] = ",".join([*modules, "dso_loader=2"])
+    print("Native diagnostics: TF_CPP_MIN_LOG_LEVEL=0 TF_CPP_VMODULE="
+          + os.environ["TF_CPP_VMODULE"], file=sys.stderr, flush=True)
+
 import cv2
 import numpy as np
 from scenedetect import AdaptiveDetector, SceneManager, open_video
 from ultralytics import YOLO
 
 # Modern MediaPipe Tasks Vision API
+MP_IMPORT_ERROR = None
 try:
     import mediapipe as mp
     from mediapipe.tasks import python as mp_python
@@ -36,6 +53,7 @@ try:
 
     HAS_MP_TASKS = True
 except Exception:
+    MP_IMPORT_ERROR = traceback.format_exc()
     mp = None
     mp_python = None
     mp_vision = None
@@ -59,6 +77,7 @@ try:
     import torch
 except Exception:
     torch = None
+    logging.warning("PyTorch import failed", exc_info=True)
 
 CLASS_IDS = {
     "person": 0,
@@ -660,8 +679,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="High-performance AI auto-reframe with single-pass pipeline and robust velocity estimation."
     )
-    parser.add_argument("input", help="Source widescreen video file")
-    parser.add_argument("output", help="Destination vertical video file")
+    parser.add_argument("input", nargs="?", help="Source widescreen video file")
+    parser.add_argument("output", nargs="?", help="Destination vertical video file")
+    parser.add_argument("--diagnose-env", action="store_true",
+                        help="Print runtime/GPU diagnostics and test the requested encoder, then exit")
+    parser.add_argument("--native-debug", action="store_true",
+                        help="Enable native DSO loader logs before importing MediaPipe; keep stderr visible")
+    parser.add_argument("--max-frames", type=int, default=None,
+                        help="Process only the first N frames for a short diagnostic render")
+    parser.add_argument("--device", default="auto",
+                        help="YOLO inference device: auto, cpu, mps, cuda, cuda:N, or GPU index N")
 
     parser.add_argument("--seg-model", default="yolo26n-seg.pt")
     parser.add_argument("--tracker", default="bytetrack.yaml")
@@ -730,6 +757,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--video-encoder", default="auto")
+    parser.add_argument("--ffmpeg-log-level", default="warning",
+                        choices=["error", "warning", "info", "verbose", "debug"],
+                        help="FFmpeg stderr verbosity; output is streamed to the terminal")
     parser.add_argument("--audio-bitrate", default="192k")
     parser.add_argument("--crf", type=int, default=18)
     parser.add_argument("--preset-ffmpeg", default="medium")
@@ -832,6 +862,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--lookahead-seconds", type=float, default=0.12)
     args = parser.parse_args()
+    if not args.diagnose_env and (not args.input or not args.output):
+        parser.error("input and output are required unless --diagnose-env is used")
+    if args.max_frames is not None and args.max_frames < 1:
+        parser.error("max-frames must be >= 1")
 
     if (
         args.saliency_interval < 1
@@ -909,7 +943,113 @@ def setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level),
         format="%(asctime)s | %(levelname)s | %(message)s",
+        stream=sys.stderr,
+        force=True,
     )
+
+
+def resolve_yolo_device(requested: str) -> str:
+    """Choose an explicit backend; a requested unavailable GPU must not become CPU."""
+    device = requested.strip().lower()
+    if device == "cpu":
+        return device
+    if device == "auto":
+        if torch is not None and torch.cuda.is_available():
+            return "cuda:0"
+        logging.warning("YOLO auto device: CUDA unavailable; selecting CPU")
+        return "cpu"
+    if device == "mps":
+        if (torch is None or not hasattr(torch.backends, "mps")
+                or not torch.backends.mps.is_available()):
+            raise RuntimeError("Requested YOLO MPS device is unavailable")
+        return device
+    index = "0" if device == "cuda" else device.removeprefix("cuda:")
+    if not index.isdecimal():
+        raise ValueError("--device must be auto, cpu, mps, cuda, cuda:N, or GPU index N")
+    if (torch is None or not torch.cuda.is_available()
+            or int(index) >= torch.cuda.device_count()):
+        raise RuntimeError(f"Requested YOLO CUDA device {requested!r} is unavailable")
+    return f"cuda:{int(index)}"
+
+
+def log_runtime_info(args) -> None:
+    script = Path(__file__).resolve()
+    logging.info("Script=%s sha256=%s", script, hashlib.sha256(script.read_bytes()).hexdigest())
+    logging.info("Python=%s version=%s cwd=%s", sys.executable, sys.version.split()[0], Path.cwd())
+    logging.info("Command: %s", shlex.join([sys.executable, *sys.argv]))
+    logging.info("YOLO model=%s requested_device=%s selected_device=%s",
+                 args.seg_model, args.device, args.yolo_device)
+    logging.info("Encoder requested=%s; MediaPipe face/pose delegate=CPU (independent of YOLO)",
+                 args.video_encoder)
+    if torch is not None:
+        logging.info("PyTorch=%s CUDA build=%s CUDA available=%s",
+                     torch.__version__, torch.version.cuda, torch.cuda.is_available())
+        if args.yolo_device.startswith("cuda:"):
+            index = int(args.yolo_device.split(":")[1])
+            logging.info("YOLO GPU=%s capability=%s", torch.cuda.get_device_name(index),
+                         torch.cuda.get_device_capability(index))
+    if MP_IMPORT_ERROR:
+        logging.warning("MediaPipe Tasks import failed; checking legacy fallback:\n%s", MP_IMPORT_ERROR)
+    logging.debug("Resolved arguments: %s", vars(args))
+
+
+def verify_yolo_device(model, expected: str) -> str:
+    """Report the predictor's actual backend after lazy model initialization."""
+    actual = str(model.predictor.device)
+    logging.info("YOLO actual inference device=%s (selected=%s)", actual, expected)
+    if actual != expected and not (expected == "mps" and actual == "mps:0"):
+        raise RuntimeError(f"YOLO device mismatch: selected {expected}, actual {actual}")
+    return actual
+
+
+def diagnose_environment(args) -> int:
+    """Run bounded probes in the same CLI interpreter without loading video/model files."""
+    failed = False
+    for key in ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "LD_PRELOAD"):
+        logging.info("%s=%s", key, os.environ.get(key, "<unset>"))
+    for name in ("torch", "torchvision", "mediapipe", "tensorflow", "ultralytics",
+                 "numpy", "opencv-python", "opencv-contrib-python", "opencv-python-headless"):
+        try:
+            logging.info("Package %s=%s", name, importlib.metadata.version(name))
+        except importlib.metadata.PackageNotFoundError:
+            logging.info("Package %s not installed", name)
+    for command in (["nvidia-smi"], ["ffmpeg", "-hide_banner", "-version"]):
+        logging.info("Diagnostic command: %s", shlex.join(command))
+        try:
+            result = subprocess.run(command, timeout=30, check=False)
+            logging.info("Diagnostic exit=%s", result.returncode)
+            # CPU-only machines need not have nvidia-smi.
+            failed |= result.returncode != 0 and command[0] == "ffmpeg"
+        except (OSError, subprocess.TimeoutExpired):
+            logging.warning("Diagnostic command failed", exc_info=True)
+            failed |= command[0] == "ffmpeg"
+    if args.yolo_device.startswith("cuda:"):
+        try:
+            x = torch.ones((32, 32), device=args.yolo_device)
+            y = x @ x
+            torch.cuda.synchronize(args.yolo_device)
+            logging.info("CUDA matmul device=%s result=%s (expected 32)", y.device, y[0, 0].item())
+            image = torch.ones((1, 3, 64, 64), device=args.yolo_device)
+            kernel = torch.ones((8, 3, 3, 3), device=args.yolo_device)
+            convolution = torch.nn.functional.conv2d(image, kernel)
+            torch.cuda.synchronize(args.yolo_device)
+            logging.info("CUDA convolution device=%s result=%s (expected 27) cuDNN=%s enabled=%s",
+                         convolution.device, convolution[0, 0, 0, 0].item(),
+                         torch.backends.cudnn.version(), torch.backends.cudnn.enabled)
+        except Exception:
+            logging.exception("CUDA computation probe failed")
+            failed = True
+    try:
+        encoder = select_live_encoder(args, 30, (320, 240), build_video_filters(args.post_restore))
+        if args.video_encoder != "auto" and encoder != args.video_encoder:
+            logging.error("Requested encoder failed diagnostic: requested=%s fallback=%s",
+                          args.video_encoder, encoder)
+            failed = True
+    except Exception:
+        logging.exception("Encoder diagnostic failed")
+        failed = True
+    logging.info("Diagnostics finished; no video was processed")
+    return int(failed)
 
 
 def apply_preset(args: argparse.Namespace) -> argparse.Namespace:
@@ -1015,7 +1155,8 @@ class MediaPipeFaceHelper:
             if resolved_model is not None:
                 try:
                     base_options = mp_python.BaseOptions(
-                        model_asset_path=str(resolved_model)
+                        model_asset_path=str(resolved_model),
+                        delegate=mp_python.BaseOptions.Delegate.CPU,
                     )
                     options = mp_vision.FaceDetectorOptions(
                         base_options=base_options,
@@ -1025,11 +1166,13 @@ class MediaPipeFaceHelper:
                     self.detector = mp_vision.FaceDetector.create_from_options(options)
                     self.is_tasks = True
                     logging.info(
-                        "MediaPipe Tasks FaceDetector initialized successfully."
+                        "MediaPipe Tasks FaceDetector initialized: delegate=CPU model=%s",
+                        resolved_model,
                     )
                 except Exception as exc:
                     logging.warning(
-                        "MediaPipe Tasks FaceDetector failed to initialize: %s", exc
+                        "MediaPipe Tasks FaceDetector failed to initialize: %s", exc,
+                        exc_info=True,
                     )
 
         if self.detector is None and legacy_mp_face is not None:
@@ -1041,7 +1184,7 @@ class MediaPipeFaceHelper:
                 self.is_tasks = False
                 logging.info("Initialized legacy MediaPipe FaceDetection solution.")
             except Exception as exc:
-                logging.warning("Legacy MediaPipe FaceDetection failed: %s", exc)
+                logging.warning("Legacy MediaPipe FaceDetection failed: %s", exc, exc_info=True)
 
         if self.detector is None:
             logging.warning(
@@ -1060,6 +1203,8 @@ class MediaPipeFaceHelper:
         prepared = prepared or SharedPersonROI(frame_bgr, person_box)
         rgb, x1, y1 = prepared.face_view()
         roi = rgb
+        logging.debug("Face ROI x=%s y=%s width=%s height=%s backend=%s",
+                      x1, y1, rgb.shape[1], rgb.shape[0], "Tasks/CPU" if self.is_tasks else "legacy")
         if rgb.size == 0:
             return None
 
@@ -1087,6 +1232,7 @@ class MediaPipeFaceHelper:
                         best_area = area
                         best = (x1 + px1, y1 + py1, x1 + px2, y1 + py2)
             except Exception:
+                logging.warning("MediaPipe Tasks face inference failed for ROI %s", rgb.shape, exc_info=True)
                 return None
         else:
             try:
@@ -1111,6 +1257,7 @@ class MediaPipeFaceHelper:
                         best_area = area
                         best = (x1 + px1, y1 + py1, x1 + px2, y1 + py2)
             except Exception:
+                logging.warning("Legacy face inference failed for ROI %s", rgb.shape, exc_info=True)
                 return None
 
         return best
@@ -1120,7 +1267,7 @@ class MediaPipeFaceHelper:
             try:
                 self.detector.close()
             except Exception:
-                pass
+                logging.warning("Face detector cleanup failed", exc_info=True)
 
 POSE_LANDMARK_NAMES = {
     0: "nose",
@@ -1170,7 +1317,8 @@ class MediaPipePoseHelper:
             if resolved_model is not None:
                 try:
                     base_options = mp_python.BaseOptions(
-                        model_asset_path=str(resolved_model)
+                        model_asset_path=str(resolved_model),
+                        delegate=mp_python.BaseOptions.Delegate.CPU,
                     )
                     options = mp_vision.PoseLandmarkerOptions(
                         base_options=base_options,
@@ -1186,11 +1334,18 @@ class MediaPipePoseHelper:
                     )
                     self.is_tasks = True
                     logging.info(
-                        "MediaPipe Tasks PoseLandmarker initialized successfully."
+                        "MediaPipe Tasks PoseLandmarker initialized: delegate=CPU model=%s",
+                        resolved_model,
+                    )
+                    logging.info(
+                        "MediaPipe pose projection uses the packaged graph. Its "
+                        "NORM_RECT/IMAGE_DIMENSIONS warning is independent of CUDA; "
+                        "native warnings remain visible."
                     )
                 except Exception as exc:
                     logging.warning(
-                        "MediaPipe Tasks PoseLandmarker failed to initialize: %s", exc
+                        "MediaPipe Tasks PoseLandmarker failed to initialize: %s", exc,
+                        exc_info=True,
                     )
 
         if self.detector is None and legacy_mp_pose is not None:
@@ -1205,7 +1360,7 @@ class MediaPipePoseHelper:
                 self.is_tasks = False
                 logging.info("Initialized legacy MediaPipe Pose solution.")
             except Exception as exc:
-                logging.warning("Legacy MediaPipe Pose failed: %s", exc)
+                logging.warning("Legacy MediaPipe Pose failed: %s", exc, exc_info=True)
 
         if self.detector is None:
             logging.warning(
@@ -1225,6 +1380,8 @@ class MediaPipePoseHelper:
         prepared = prepared or SharedPersonROI(frame_bgr, person_box, pad_ratio)
         rgb, rx1, ry1 = prepared.pose_view()
         roi = rgb
+        logging.debug("Pose ROI x=%s y=%s width=%s height=%s backend=%s",
+                      rx1, ry1, rgb.shape[1], rgb.shape[0], "Tasks/CPU" if self.is_tasks else "legacy")
         if rgb.size == 0:
             return None
         try:
@@ -1240,6 +1397,7 @@ class MediaPipePoseHelper:
                     return None
                 landmarks_list = result.pose_landmarks.landmark
         except Exception:
+            logging.warning("Pose inference failed for ROI %s", rgb.shape, exc_info=True)
             return None
 
         roi_h, roi_w = roi.shape[:2]
@@ -1366,7 +1524,7 @@ class MediaPipePoseHelper:
             try:
                 self.detector.close()
             except Exception:
-                pass
+                logging.warning("Pose detector cleanup failed", exc_info=True)
 
 def detect_scenes(
     video_path: str,
@@ -2234,18 +2392,75 @@ def draw_debug(
 
     return reframed_crop
 
+class StderrTee:
+    """Continuously drain a child's stderr to the terminal and keep a bounded error tail."""
+
+    def __init__(self, pipe):
+        self.pipe = pipe
+        self.chunks = deque(maxlen=64)
+        self.stream = sys.stderr
+        self.thread = threading.Thread(target=self._pump, name="ffmpeg-stderr", daemon=True)
+        self.thread.start()
+
+    def _pump(self):
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        try:
+            while chunk := self.pipe.read1(4096):
+                self.chunks.append(chunk)
+                self.stream.write(decoder.decode(chunk))
+                self.stream.flush()
+            self.stream.write(decoder.decode(b"", final=True))
+            self.stream.flush()
+        finally:
+            self.pipe.close()
+
+    def finish(self) -> str:
+        self.thread.join()
+        return b"".join(self.chunks).decode("utf-8", errors="replace")[-6000:]
+
+
+def start_ffmpeg(cmd, stdin=subprocess.DEVNULL):
+    logging.debug("FFmpeg command: %s", shlex.join(cmd))
+    process = subprocess.Popen(cmd, stdin=stdin, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    logging.debug("FFmpeg PID=%s", process.pid)
+    return process, StderrTee(process.stderr)
+
+
+def run_ffmpeg(cmd, timeout=None):
+    process, stderr = start_ffmpeg(cmd)
+    try:
+        code = process.wait(timeout=timeout)
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        tail = stderr.finish()
+        logging.debug("FFmpeg exit=%s", process.returncode)
+    return subprocess.CompletedProcess(cmd, code, stderr=tail)
+
+
 def has_ffmpeg_encoder(encoder_name: str) -> bool:
     if shutil.which("ffmpeg") is None:
         return False
     try:
+        logging.debug("FFmpeg command: ffmpeg -hide_banner -encoders")
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
             check=False,
+            timeout=30,
         )
+        if result.stderr:
+            sys.stderr.write(result.stderr)
+            sys.stderr.flush()
+        if result.returncode:
+            logging.warning("FFmpeg encoder listing failed: exit=%s", result.returncode)
+            return False
         return encoder_name in result.stdout
     except Exception:
+        logging.warning("Could not query FFmpeg encoders", exc_info=True)
         return False
 
 
@@ -2270,7 +2485,8 @@ def run_ffmpeg_mux(
     vf: Optional[str],
     nvenc_preset: str = "p5",
     video_bitrate: str = "8M",
-) -> None:
+    ffmpeg_log_level: str = "warning",
+) -> str:
     """Encodes a lossless intermediate with runtime hardware fallback."""
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg not found in PATH")
@@ -2294,6 +2510,8 @@ def run_ffmpeg_mux(
         ]
     else:
         encoders = [video_encoder] if has_ffmpeg_encoder(video_encoder) else []
+        if not encoders:
+            logging.warning("Requested encoder %s is absent; trying libx264 fallback", video_encoder)
         if video_encoder != "libx264":
             encoders.append("libx264")
     encoders = list(dict.fromkeys(encoders))
@@ -2315,7 +2533,7 @@ def run_ffmpeg_mux(
                 "ffmpeg",
                 "-hide_banner",
                 "-loglevel",
-                "error",
+                ffmpeg_log_level,
                 "-y",
                 "-i",
                 silent_video_path,
@@ -2357,11 +2575,11 @@ def run_ffmpeg_mux(
             if final_path.suffix.lower() in {".mp4", ".mov", ".m4v"}:
                 cmd += ["-movflags", "+faststart"]
             cmd += [str(partial)]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            result = run_ffmpeg(cmd)
             if result.returncode == 0:
                 os.replace(partial, final_path)
                 logging.info("Encoded %s with %s", final_path, encoder)
-                return
+                return encoder
             errors.append(f"{encoder}: {result.stderr[-4000:]}")
             logging.warning(
                 "Encoder %s failed; trying next available encoder. %s",
@@ -2528,7 +2746,7 @@ def process_video(args: argparse.Namespace) -> None:
                     build_video_filters(args.post_restore),
                 )
                 if args.encode_mode == "direct"
-                else LosslessWriter(str(silent_video_path), fps, size)
+                else LosslessWriter(str(silent_video_path), fps, size, args.ffmpeg_log_level)
             )
             resources.callback(writer.abort)
             if not writer.isOpened():
@@ -2545,7 +2763,7 @@ def process_video(args: argparse.Namespace) -> None:
                 debug_writer = (
                     DirectVideoWriter(final_debug_path, input_path, fps, size, args)
                     if args.encode_mode == "direct"
-                    else LosslessWriter(str(debug_video_path), fps, size)
+                    else LosslessWriter(str(debug_video_path), fps, size, args.ffmpeg_log_level)
                 )
                 resources.callback(debug_writer.abort)
                 if not debug_writer.isOpened():
@@ -2575,6 +2793,7 @@ def process_video(args: argparse.Namespace) -> None:
 
             frames = iter_video_frames(input_path)
             resources.callback(frames.close)
+            actual_yolo_device = None
 
             for frame_idx, frame in frames:
                 is_cut = (
@@ -2596,8 +2815,11 @@ def process_video(args: argparse.Namespace) -> None:
                     classes=allowed_class_ids,
                     conf=args.conf,
                     retina_masks=args.retina_masks,
+                    device=args.yolo_device,
                     verbose=False,
                 )[0]
+                if actual_yolo_device is None:
+                    actual_yolo_device = verify_yolo_device(model, args.yolo_device)
 
                 if is_cut:
                     scene_index += 1
@@ -2874,6 +3096,9 @@ def process_video(args: argparse.Namespace) -> None:
                     debug_writer.write(dbg)
 
                 stats["frames_processed"] += 1
+                if args.max_frames is not None and stats["frames_processed"] >= args.max_frames:
+                    logging.info("Reached diagnostic frame limit: %s", args.max_frames)
+                    break
 
                 if frame_idx % 50 == 0:
                     saliency_telemetry = saliency_helper.get_telemetry()
@@ -2891,9 +3116,10 @@ def process_video(args: argparse.Namespace) -> None:
             if debug_writer is not None:
                 debug_writer.release()
 
+            actual_encoder = getattr(writer, "encoder", None)
             if args.encode_mode == "lossless":
                 vf = build_video_filters(post_restore=args.post_restore)
-                run_ffmpeg_mux(
+                actual_encoder = run_ffmpeg_mux(
                     silent_video_path=str(silent_video_path),
                     source_input_path=str(input_path),
                     final_output_path=str(output_path),
@@ -2904,6 +3130,7 @@ def process_video(args: argparse.Namespace) -> None:
                     vf=vf,
                     nvenc_preset=args.nvenc_preset,
                     video_bitrate=args.video_bitrate,
+                    ffmpeg_log_level=args.ffmpeg_log_level,
                 )
 
                 if debug_writer is not None and final_debug_path is not None:
@@ -2918,6 +3145,7 @@ def process_video(args: argparse.Namespace) -> None:
                         vf=None,
                         nvenc_preset=args.nvenc_preset,
                         video_bitrate=args.video_bitrate,
+                        ffmpeg_log_level=args.ffmpeg_log_level,
                     )
 
             saliency_telemetry = saliency_helper.get_telemetry()
@@ -2933,6 +3161,10 @@ def process_video(args: argparse.Namespace) -> None:
                 "output_height": args.output_height,
                 "post_restore": args.post_restore,
                 "encode_mode": args.encode_mode,
+                "seg_model": args.seg_model,
+                "yolo_device": actual_yolo_device,
+                "video_encoder_requested": args.video_encoder,
+                "video_encoder_actual": actual_encoder,
                 "scene_method": args.scene_method,
                 "retina_masks": args.retina_masks,
                 "saliency_active_backend": saliency_telemetry.get("active_backend"),
@@ -3041,51 +3273,43 @@ class CueCache:
 class LosslessWriter:
     """BGR frames -> lossless FFV1 temporary file; final encode can safely retry."""
 
-    def __init__(self, path: str, fps: float, size: tuple[int, int]):
+    def __init__(self, path: str, fps: float, size: tuple[int, int], ffmpeg_log_level="warning"):
         self.width, self.height = size
         self.closed = False
-        self.error_log = tempfile.TemporaryFile()
-        try:
-            self.process = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-f",
-                    "rawvideo",
-                    "-pix_fmt",
-                    "bgr24",
-                    "-s",
-                    f"{self.width}x{self.height}",
-                    "-r",
-                    str(fps),
-                    "-i",
-                    "pipe:0",
-                    "-an",
-                    "-c:v",
-                    "ffv1",
-                    "-level",
-                    "3",
-                    "-pix_fmt",
-                    "bgr0",
-                    path,
-                ],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=self.error_log,
-            )
-        except BaseException:
-            self.error_log.close()
-            raise
+        self.process, self.error_output = start_ffmpeg(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                ffmpeg_log_level,
+                "-y",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "bgr24",
+                "-s",
+                f"{self.width}x{self.height}",
+                "-r",
+                str(fps),
+                "-i",
+                "pipe:0",
+                "-an",
+                "-c:v",
+                "ffv1",
+                "-level",
+                "3",
+                "-pix_fmt",
+                "bgr0",
+                path,
+            ],
+            stdin=subprocess.PIPE,
+        )
 
     def isOpened(self):
         return not self.closed and self.process.poll() is None
 
     def _error(self):
-        self.error_log.seek(0)
-        return self.error_log.read().decode("utf-8", errors="replace")[-6000:]
+        return self.error_output.finish()
 
     def write(self, frame):
         if frame.shape != (self.height, self.width, 3) or frame.dtype != np.uint8:
@@ -3104,8 +3328,13 @@ class LosslessWriter:
         if self.closed:
             return
         try:
-            self.process.stdin.close()
+            try:
+                self.process.stdin.close()
+            except BrokenPipeError:
+                pass  # Drain stderr and report the child's exit status below.
             code = self.process.wait()
+            self.error_output.finish()
+            logging.debug("Lossless FFmpeg exit=%s", code)
             if code:
                 raise RuntimeError(f"Lossless encoding failed: {self._error()}")
         finally:
@@ -3127,7 +3356,7 @@ class LosslessWriter:
                 self.process.stdin.close()
         except BrokenPipeError:
             pass
-        self.error_log.close()
+        self.error_output.finish()
 
 def mask_statistics(masks, indices: list[int], frame_shape: tuple[int, int]) -> dict:
     """Reduce only selected low-resolution masks; transfer four numbers per mask."""
@@ -3406,12 +3635,13 @@ def select_live_encoder(args, fps, size, vf):
     errors = []
     for encoder in options:
         if not has_ffmpeg_encoder(encoder):
+            logging.warning("Encoder %s is absent from this FFmpeg build; trying fallback", encoder)
             continue
         cmd = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel",
-            "error",
+            args.ffmpeg_log_level,
             "-f",
             "lavfi",
             "-i",
@@ -3432,15 +3662,14 @@ def select_live_encoder(args, fps, size, vf):
             "-",
         ]
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30, check=False
-            )
+            result = run_ffmpeg(cmd, timeout=30)
             if result.returncode == 0:
-                logging.info("Selected live encoder: %s", encoder)
+                logging.info("Selected live encoder: %s (requested=%s)", encoder, requested)
                 return encoder
             errors.append(f"{encoder}: {result.stderr[-1000:]}")
         except subprocess.TimeoutExpired:
             errors.append(f"{encoder}: initialization timed out")
+            logging.warning("Encoder %s initialization timed out after 30 seconds", encoder)
         logging.warning("Encoder %s failed initialization; trying fallback", encoder)
     raise RuntimeError("No encoder could initialize:\n" + "\n".join(errors))
 
@@ -3462,12 +3691,11 @@ class DirectVideoWriter(LosslessWriter):
         )
         os.close(fd)
         self.partial = Path(path)
-        self.error_log = tempfile.TemporaryFile()
         cmd = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel",
-            "error",
+            args.ffmpeg_log_level,
             "-y",
             "-thread_queue_size",
             "64",
@@ -3500,14 +3728,11 @@ class DirectVideoWriter(LosslessWriter):
             cmd += ["-movflags", "+faststart"]
         cmd += [str(self.partial)]
         try:
-            self.process = subprocess.Popen(
+            self.process, self.error_output = start_ffmpeg(
                 cmd,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=self.error_log,
             )
         except BaseException:
-            self.error_log.close()
             self.partial.unlink(missing_ok=True)
             raise
 
@@ -3519,8 +3744,13 @@ class DirectVideoWriter(LosslessWriter):
         if self.closed:
             return
         try:
-            self.process.stdin.close()
+            try:
+                self.process.stdin.close()
+            except BrokenPipeError:
+                pass  # Drain stderr and report the child's exit status below.
             result = self.process.wait()
+            self.error_output.finish()
+            logging.debug("Direct FFmpeg exit=%s encoder=%s", result, self.encoder)
             if result or self.frame_count == 0:
                 raise RuntimeError(
                     f"Direct encoding failed: {self._error()}. "
@@ -3540,6 +3770,10 @@ def main() -> int:
 
     try:
         args = apply_preset(args)
+        args.yolo_device = resolve_yolo_device(args.device)
+        log_runtime_info(args)
+        if args.diagnose_env:
+            return diagnose_environment(args)
         process_video(args)
         return 0
     except KeyboardInterrupt:
