@@ -60,6 +60,54 @@ On macOS you can instead double-click `run_verthor.command` — it provisions th
 
 ### 執行範例與參數解析
 
+### Colab T4：裝置確認與即時診斷
+
+YOLO/PyTorch 推論、MediaPipe 人臉／姿態分析、FFmpeg 編碼各自使用不同後端。
+`--device auto` 在 CUDA 可用時明確選擇 `cuda:0`，否則記錄原因並使用 CPU。
+`--device 0` 強制使用第一張 GPU；無法使用時直接報錯，不會悄悄改成 CPU。
+第一幀推論後會輸出 `YOLO actual inference device=...`，結尾 Summary 會列出
+實際模型、YOLO 裝置，以及要求／實際選用的編碼器。
+
+先在與影片相同的工作目錄，使用目前執行的 Python 與程式做環境診斷：
+
+```python
+!python3 -u /usr/local/bin/auto_reframe.py --diagnose-env --device 0 --video-encoder hevc_nvenc --post-restore --native-debug --log-level DEBUG --ffmpeg-log-level info
+```
+
+此模式不讀取影片或下載模型。它列出程式路徑與 SHA256、Python、套件、GPU 資訊，
+實測 CUDA 矩陣乘法及卷積，再使用指定編碼器與後處理濾鏡做兩幀測試。
+如果要求 `hevc_nvenc` 卻只能回退 `libx264`，診斷會回傳失敗狀態。
+一般影片處理仍保留原有的編碼器回退行為，並明確記錄失敗原因及實際編碼器。
+
+接著用明確的模型名稱與原本參數，先跑 90 幀：
+
+```python
+!python3 -u /usr/local/bin/auto_reframe.py 'vv110.mp4' 'vv110V_test.mp4' --seg-model yolo26n-seg.pt --device 0 --lock-first-subject --dead-zone 0.15 --post-restore --video-encoder hevc_nvenc --max-frames 90 --native-debug --log-level DEBUG --ffmpeg-log-level info
+```
+
+`--max-frames` 只限制這次輸出的影片長度；正式處理時移除它並更換輸出檔名。
+輸入檔名需完全一致，例如 `vv110.mp4` 與 `v110.mp4` 是不同檔案。
+若曾把程式複製到 `/usr/local/bin/auto_reframe.py`，更新 Git checkout 後也要重新複製：
+
+```python
+import shutil
+shutil.copy2('/content/auto-vertical-reframe/auto_reframe.py', '/usr/local/bin/auto_reframe.py')
+```
+
+| 訊息／參數 | 判讀或用途 |
+| --- | --- |
+| `cudart_stub.cc: Could not find cuda drivers...` | 可能是 MediaPipe 匯入時的 CUDA runtime 探測訊息；需和 PyTorch 實測、實際 YOLO 裝置分開判斷。`libcuda.so.1` 可載入不代表每個套件都能按名稱載入它需要的 `libcudart`。 |
+| `Created TensorFlow Lite XNNPACK delegate for CPU` | MediaPipe 在此程式明確使用 CPU delegate，這是資訊訊息；不決定 YOLO 或 NVENC 的裝置。 |
+| `NORM_RECT without IMAGE_DIMENSIONS` | 來自 MediaPipe 套件內部的 landmark projection graph。Tasks 的 Python `detect()` 沒有同名 `IMAGE_DIMENSIONS` 參數；不能憑這句警告判定外部裁切圖形狀有錯。原始警告保留，`DEBUG` 額外列出傳入 ROI 的尺寸。 |
+| `--native-debug` | 在匯入原生套件前啟用 `dso_loader=2`，並印出採用的環境參數；不修改 CUDA 函式庫搜尋路徑。 |
+| `--log-level DEBUG` | 列出完整 CLI 設定、ROI 尺寸、FFmpeg 子程序命令、PID 與退出狀態。 |
+| `--ffmpeg-log-level info` | 提高 FFmpeg 詳細程度；原始 stderr 即時送到 terminal，同時保留有界的錯誤摘要供例外使用。 |
+
+原生 MediaPipe／TensorFlow 警告不會被過濾；face/pose 初始化與推論例外會附 traceback 輸出。
+`--native-debug` 提供更多載入證據，並不承諾消除套件內部警告。
+
+### 固定鏡頭範例
+
 如果您希望重構後的直式畫面**如同架在三腳架上的固定鏡頭**，鎖定開場主角且不隨意推拉變焦，可以直接在終端機執行以下指令：
 
 ```bash
