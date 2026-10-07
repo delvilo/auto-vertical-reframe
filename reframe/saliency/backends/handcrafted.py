@@ -7,7 +7,6 @@ from reframe.contracts import BackendPrediction, FrameContext
 from reframe.saliency.base import SaliencyBackend
 
 
-
 class HandcraftedSaliencyHelper(SaliencyBackend):
     """Computes spectral residual saliency combined with motion energy."""
 

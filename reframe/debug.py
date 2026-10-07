@@ -89,5 +89,3 @@ def draw_debug(
         y += 28
 
     return reframed_crop
-
-

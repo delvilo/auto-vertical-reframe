@@ -162,7 +162,7 @@ Summary 另外列出 `frames_with_head_cues`、`frames_with_pose`、
 %%bash
 set -euo pipefail
 cd /content/auto-vertical-reframe
-git fetch origin codex/modular-saliency-stage1
+git fetch origin refs/heads/codex/modular-saliency-stage1:refs/remotes/origin/codex/modular-saliency-stage1
 git switch codex/modular-saliency-stage1 || git switch --track origin/codex/modular-saliency-stage1
 git merge --ff-only origin/codex/modular-saliency-stage1
 git rev-parse HEAD
@@ -223,6 +223,23 @@ saliency state, frame decoding and encoder processes on success, error or interr
 
 Phase 1 retains handcrafted and DeepGaze MR only. DeepGaze MSDB, ViNet and
 pose-driven adaptive scheduling are future work. SAM2 is not a dependency or backend.
+
+### Local regression checks
+
+After installing dependencies, run:
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m unittest test_security test_security_reframe -v
+python3 -c 'import test_torch_load; test_torch_load.test_torch_load_weights_only()'
+```
+
+Tests exercise pose geometry/association, raw-keypoint freshness, temporal ingestion,
+saliency map geometry/flow/EMA, backend warmup/fallback, scene resets, cleanup on
+exceptions/interrupts, CLI bootstrap order and live FFmpeg stderr. Video smoke tests
+use actual FFmpeg with controlled model outputs. Model weights and CUDA are not
+required for these checks; saliency numeric tests require real OpenCV. They do not
+replace the Colab T4/YOLO/NVENC or real DeepGaze MR validation.
 
 `--native-debug` 在匯入 PyTorch 前啟用 `TORCH_SHOW_CPP_STACKTRACES=1` 與
 Python faulthandler，並印出採用的設定及 PyTorch build 資訊。

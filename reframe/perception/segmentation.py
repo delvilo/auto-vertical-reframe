@@ -112,7 +112,6 @@ def parse_tracks(result: Any, frame_shape: tuple[int, int], allowed_class_ids: l
                  for i, cls_id, conf, x1, y1, x2, y2, track_id in parsed_rows)
 
 
-
 class SegmentationTracker:
     """Owns the persistent segmentation model and resets IDs at scene cuts."""
     def __init__(self, config: AppConfig, allowed_class_ids: list[int]):

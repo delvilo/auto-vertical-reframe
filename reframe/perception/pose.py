@@ -100,7 +100,7 @@ def pose_cues(keypoints, person_box, frame_shape, min_confidence) -> PoseCues | 
 class YOLOPoseHelper:
     """One persistent COCO-17 model, batched BGR ROIs, no separate face model."""
 
-    def __init__(self, args):
+    def __init__(self, args: AppConfig):
         path = Path(args.pose_model)
         if path.suffix.lower() != ".pt":
             raise ValueError("--pose-model requires a COCO-17 YOLO .pt checkpoint")

@@ -73,5 +73,3 @@ class InlineSceneDetector:
             self.last_cut = frame_idx
             self.history.clear()
         return cut
-
-

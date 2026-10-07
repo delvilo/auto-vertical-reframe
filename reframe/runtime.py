@@ -125,5 +125,3 @@ def diagnose_environment(args) -> int:
         failed = True
     logging.info("Diagnostics finished; no video was processed")
     return int(failed)
-
-

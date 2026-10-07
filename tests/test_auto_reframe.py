@@ -11,7 +11,8 @@ for mod in ['cv2', 'scenedetect', 'ultralytics']:
             sys.modules[mod] = MagicMock()
 
 import numpy as np
-from auto_reframe import HandcraftedSaliencyHelper, regression_velocity
+from reframe.saliency.backends.handcrafted import HandcraftedSaliencyHelper
+from reframe.camera import regression_velocity
 
 
 class TestAutoReframe(unittest.TestCase):

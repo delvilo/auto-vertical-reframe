@@ -408,5 +408,3 @@ def regression_velocity(history):
         return 0.0, 0.0
     slopes = (a[j[valid], 1:] - a[i[valid], 1:]) / dt[valid, None]
     return tuple(np.median(slopes, axis=0))
-
-

@@ -2,9 +2,9 @@ import ast
 from pathlib import Path
 
 def test_torch_load_weights_only():
-    auto_reframe_path = Path(__file__).parent / "auto_reframe.py"
+    auto_reframe_path = Path(__file__).parent / "reframe/saliency/backends/deepgazemr.py"
     with open(auto_reframe_path, "r", encoding="utf-8") as f:
-        tree = ast.parse(f.read(), filename="auto_reframe.py")
+        tree = ast.parse(f.read(), filename=str(auto_reframe_path))
 
     torch_load_calls = []
     for node in ast.walk(tree):
@@ -23,3 +23,4 @@ def test_torch_load_weights_only():
             isinstance(weights_only_kw[0].value, ast.Constant)
             and weights_only_kw[0].value.value is True
         ), "weights_only must be set to True in torch.load call"
+

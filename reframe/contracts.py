@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, TYPE_CHECKING, TypedDict
+from typing import Literal, Optional, TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     import numpy as np
