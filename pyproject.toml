@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-vertical-reframe"
+version = "0.2.0"
+description = "Scene-aware vertical video reframing with YOLO pose and saliency"
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[project.scripts]
+"auto_reframe.py" = "reframe.cli:main"
+auto-reframe = "reframe.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["reframe*"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
