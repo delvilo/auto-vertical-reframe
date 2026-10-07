@@ -321,7 +321,7 @@ class LosslessWriter:
         self.error_output.finish()
 
 
-def encoder_options(encoder, args):
+def encoder_options(encoder, args: AppConfig):
     if encoder in {"libx264", "libx265"}:
         return ["-crf", str(args.crf), "-preset", args.preset_ffmpeg]
     if encoder.endswith("_nvenc"):
@@ -338,7 +338,7 @@ def encoder_options(encoder, args):
     return ["-b:v", args.video_bitrate]
 
 
-def select_live_encoder(args, fps, size, vf):
+def select_live_encoder(args: AppConfig, fps, size, vf):
     """Initializes encoders with a 2-frame test before starting full render."""
     requested = args.video_encoder
     options = (
@@ -479,4 +479,3 @@ class DirectVideoWriter(LosslessWriter):
     def abort(self):
         super().abort()
         self.partial.unlink(missing_ok=True)
-

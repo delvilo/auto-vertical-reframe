@@ -9,8 +9,8 @@ from contextlib import ExitStack
 from pathlib import Path
 import cv2
 from reframe.config import AppConfig, CLASS_IDS
-from reframe.contracts import CameraState, CameraObservation, FrameContext
-from reframe.geometry import compute_base_crop, current_crop_size, clamp
+from reframe.contracts import CameraState, FrameContext
+from reframe.geometry import compute_base_crop, current_crop_size, clamp, lerp
 from reframe.perception.segmentation import SegmentationTracker
 from reframe.perception.pose import YOLOPoseHelper, PoseCueCache, observe_poses
 from reframe.saliency.factory import build_saliency_helper
@@ -23,7 +23,6 @@ from reframe.scenes import detect_scenes, InlineSceneDetector
 from reframe.video_io import (DirectVideoWriter, LosslessWriter, build_video_filters,
                               run_ffmpeg_mux, iter_video_frames)
 from reframe.debug import draw_debug
-
 
 
 def process_video(args: AppConfig) -> None:
@@ -44,14 +43,15 @@ def process_video(args: AppConfig) -> None:
         raise RuntimeError("ffmpeg not found in PATH")
 
     cap = cv2.VideoCapture(str(input_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open input video: {input_path}")
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.release()
+    try:
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open input video: {input_path}")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    finally:
+        cap.release()
 
     if not math.isfinite(fps) or fps <= 0 or min(frame_w, frame_h) < 64:
         raise ValueError("Invalid video dimensions or FPS")

@@ -18,12 +18,14 @@ for module in ("cv2", "scenedetect", "ultralytics"):
         sys.modules[module] = MagicMock()
 
 import numpy as np
-import auto_reframe as app
+from reframe.perception import pose as app, segmentation
+from reframe import cli, config, contracts, subjects, pipeline, scenes
+from reframe.contracts import FrameContext, PoseDetection
 
 
 def arguments(*extra):
     with patch.object(sys, "argv", ["auto_reframe.py", "in.mp4", "out.mp4", *extra]):
-        args = app.parse_args()
+        args = cli.parse_args()
         args.yolo_device = "cpu"
         return args
 
@@ -126,8 +128,9 @@ class PredictorTests(unittest.TestCase):
                                   {3: (100, 20, 200, 220)})[3]
         fake.predict.assert_called_once()
         np.testing.assert_array_equal(fake.predict.call_args.kwargs["source"][0][0, 0], [5, 10, 250])
-        self.assertEqual(cues["body_cx"], 150)
-        self.assertEqual(cues["eye_y"], 40)
+        self.assertEqual(cues.cues["body_cx"], 150)
+        np.testing.assert_array_equal(cues.keypoints, skeleton())
+        self.assertEqual(cues.cues["eye_y"], 40)
         self.assertEqual(helper.actual_device, "cpu")
 
     def test_neighbor_pose_cannot_be_assigned_to_requested_track(self):
@@ -195,27 +198,27 @@ class CacheTests(unittest.TestCase):
     def setUp(self):
         self.helper = MagicMock()
         self.cues = app.pose_cues(skeleton(), (100, 20, 200, 220), (240, 400), .35)
-        self.helper.detect_many.side_effect = lambda frame, req, people: {i: self.cues for i, _, _ in req}
+        self.helper.detect_many.side_effect = lambda frame, req, people: {i: PoseDetection(skeleton(), self.cues) if self.cues else None for i, _, _ in req}
         self.cache = app.PoseCueCache(self.helper, .2, 60)
         self.frame = np.zeros((300, 500, 3), np.uint8)
 
     def get(self, frame_idx, box=(100, 20, 200, 220), track=91, others=None):
-        return self.cache.get_many(self.frame, [(0, box, track)], {0: box, **(others or {})}, frame_idx)[0]
+        return self.cache.get_many(self.frame, [(0, box, track)], {0: box, **(others or {})}, FrameContext(frame_idx, (frame_idx - 1) / 60, 500, 300, 1))[0]
 
     def test_coordinates_head_box_and_boolean_survive_cache_remap(self):
         first = self.get(1)
         moved = self.get(2, (110, 25, 220, 245))
         self.helper.detect_many.assert_called_once()
-        self.assertAlmostEqual(moved["eye_y"], 47)
-        self.assertAlmostEqual(moved["body_cx"], 165)
-        self.assertAlmostEqual(moved["shoulder_span"], 66)
-        self.assertAlmostEqual(moved["head_box"][0], 110 + (first["head_box"][0] - 100) * 1.1)
-        self.assertIs(moved["has_pose"], True)
+        self.assertAlmostEqual(moved.cues["eye_y"], 47)
+        self.assertAlmostEqual(moved.cues["body_cx"], 165)
+        self.assertAlmostEqual(moved.cues["shoulder_span"], 66)
+        self.assertAlmostEqual(moved.cues["head_box"][0], 110 + (first.cues["head_box"][0] - 100) * 1.1)
+        self.assertIs(moved.cues["has_pose"], True)
 
     def test_empty_pose_is_cached_until_expiration(self):
         self.cues = None
-        self.assertIsNone(self.get(1))
-        self.assertIsNone(self.get(2))
+        self.assertIsNone(self.get(1).cues)
+        self.assertIsNone(self.get(2).cues)
         self.helper.detect_many.assert_called_once()
         self.get(13)
         self.assertEqual(self.helper.detect_many.call_count, 2)
@@ -235,20 +238,46 @@ class CacheTests(unittest.TestCase):
         self.get(2)
         self.assertEqual(self.helper.detect_many.call_count, 2)
 
+    def test_cached_points_keep_confidence_and_true_inference_time(self):
+        first = self.get(1)
+        second = self.get(2, (110, 25, 220, 245))
+        third = self.get(3, (110, 25, 220, 245))
+        self.assertEqual(second.keypoints.shape, (17, 3))
+        np.testing.assert_array_equal(second.keypoints[:, 2], first.keypoints[:, 2])
+        np.testing.assert_array_equal(second.inferred_keypoints, skeleton())
+        np.testing.assert_allclose(second.keypoints[:, 0], 110 + (skeleton()[:, 0] - 100) * 1.1)
+        np.testing.assert_allclose(third.keypoints, second.keypoints)
+        self.assertEqual(third.inferred_at.frame_index, 1)
+        self.assertEqual(third.inferred_at.timestamp, 0)
+        self.assertEqual(third.frame.frame_index, 3)
+        self.assertEqual(third.source, "remapped")
+        self.assertEqual(third.track_id, 91)
+        self.assertEqual(self.get(13).inferred_at.frame_index, 13)
+
+    def test_cached_missing_pose_keeps_original_miss_time(self):
+        self.cues = None
+        first, second = self.get(1), self.get(2)
+        self.assertIsNone(second.keypoints)
+        self.assertIsNone(second.cues)
+        self.assertEqual(second.source, "remapped")
+        self.assertEqual(second.inferred_at, first.inferred_at)
+
 
 class PipelineTests(unittest.TestCase):
     def build(self, rows, helper, top_k=0):
         boxes = MagicMock()
         boxes.data = np.asarray(rows, dtype=float)
         boxes.__len__.return_value = len(rows)
-        state = app.CameraState(crop_center_x=200, crop_center_y=120, zoom=1,
+        state = contracts.CameraState(crop_center_x=200, crop_center_y=120, zoom=1,
                                 target_center_x=200, target_center_y=120, target_zoom=1,
                                 tracked_id=91)
-        with patch.object(app, "extract_saliency_region", return_value=None):
-            return app.build_candidates(SimpleNamespace(boxes=boxes, masks=None),
-                                        np.zeros((240, 400, 3), np.uint8), np.zeros((240, 400)),
-                                        app.SubjectRankingModel(), [0, 16], {0: "person", 16: "dog"},
-                                        helper, state, 60, 1, [], cue_top_k=top_k)
+        frame = np.zeros((240, 400, 3), np.uint8)
+        tracks = segmentation.parse_tracks(SimpleNamespace(boxes=boxes, masks=None), frame.shape[:2], [0, 16])
+        observations = app.observe_poses(frame, tracks, helper, state, FrameContext(1, 0, 400, 240, 1), top_k)
+        with patch.object(subjects, "extract_saliency_region", return_value=None):
+            return subjects.build_candidates(observations, np.zeros((240, 400)),
+                                             subjects.SubjectRankingModel(), {0: "person", 16: "dog"},
+                                             state, 60, [])
 
     def test_top_k_keeps_tracked_subject_and_matching_sees_all_people(self):
         helper = MagicMock()
@@ -291,11 +320,11 @@ class FullPipelineTests(unittest.TestCase):
             args = arguments("--device", "cpu", "--video-encoder", "libx264",
                              "--output-width", "128", "--output-height", "192", "--max-frames", "3")
             args.input, args.output = str(source), str(output)
-            args = app.apply_preset(args)
+            args = config.apply_preset(args)
             capture = MagicMock()
             capture.isOpened.return_value = True
-            props = {app.cv2.CAP_PROP_FPS: 30, app.cv2.CAP_PROP_FRAME_WIDTH: 400,
-                     app.cv2.CAP_PROP_FRAME_HEIGHT: 240, app.cv2.CAP_PROP_FRAME_COUNT: 3}
+            props = {pipeline.cv2.CAP_PROP_FPS: 30, pipeline.cv2.CAP_PROP_FRAME_WIDTH: 400,
+                     pipeline.cv2.CAP_PROP_FRAME_HEIGHT: 240, pipeline.cv2.CAP_PROP_FRAME_COUNT: 3}
             capture.get.side_effect = lambda prop: props[prop]
             boxes = MagicMock()
             boxes.__len__.return_value = 1
@@ -308,18 +337,19 @@ class FullPipelineTests(unittest.TestCase):
             points[:, 0] -= 88
             pose.predict.return_value = [result([[12, 20, 112, 220]], [points])]
             saliency = MagicMock()
-            saliency.compute_map.return_value = np.zeros((240, 400))
-            saliency.get_telemetry.return_value = {"active_backend": "handcrafted"}
+            saliency.process.return_value = SimpleNamespace(map=np.zeros((240, 400)))
+            saliency.telemetry.return_value = {"active_backend": "handcrafted"}
             frames = ((i, np.zeros((240, 400, 3), np.uint8)) for i in range(1, 4))
-            with patch.object(app.cv2, "VideoCapture", return_value=capture), \
-                    patch.object(app.cv2, "resize", side_effect=lambda image, size, **kw: np.zeros((size[1], size[0], 3), np.uint8)), \
-                    patch.object(app, "iter_video_frames", return_value=frames), \
-                    patch.object(app, "YOLO", side_effect=[segment, pose]), \
-                    patch.object(app, "build_saliency_helper", return_value=saliency), \
-                    patch.object(app, "extract_saliency_region", return_value=None), \
-                    patch.object(app.InlineSceneDetector, "update", side_effect=[True, False, False]), \
+            with patch.object(pipeline.cv2, "VideoCapture", return_value=capture), \
+                    patch.object(pipeline.cv2, "resize", side_effect=lambda image, size, **kw: np.zeros((size[1], size[0], 3), np.uint8)), \
+                    patch.object(pipeline, "iter_video_frames", return_value=frames), \
+                    patch.object(segmentation, "YOLO", return_value=segment), \
+                    patch.object(app, "YOLO", return_value=pose), \
+                    patch.object(pipeline, "build_saliency_helper", return_value=saliency), \
+                    patch.object(subjects, "extract_saliency_region", return_value=None), \
+                    patch.object(scenes.InlineSceneDetector, "update", side_effect=[True, False, False]), \
                     self.assertLogs(level="INFO") as logs:
-                app.process_video(args)
+                pipeline.process_video(args)
             summary = json.loads(next(line.split("Summary: ", 1)[1]
                                       for line in logs.output if "Summary: " in line))
             self.assertEqual(summary["frames_processed"], 3)

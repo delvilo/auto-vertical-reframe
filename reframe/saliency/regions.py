@@ -61,4 +61,3 @@ def extract_saliency_region(
         bottom * sy,
         confidence,
     )
-

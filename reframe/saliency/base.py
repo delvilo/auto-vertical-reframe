@@ -7,7 +7,6 @@ if TYPE_CHECKING:
     import numpy as np
 
 
-
 class SaliencyBackend(ABC):
     """observe receives every resized BGR uint8 frame, including skipped predictions.
 

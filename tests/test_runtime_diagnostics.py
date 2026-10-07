@@ -18,12 +18,13 @@ for module in ("cv2", "scenedetect", "ultralytics"):
         sys.modules[module] = MagicMock()
 
 import numpy as np
-import auto_reframe as app
+from reframe import runtime as app
+from reframe import cli, video_io
 
 
 def arguments(*extra):
     with patch.object(sys, "argv", ["auto_reframe.py", "input.mp4", "output.mp4", *extra]):
-        return app.parse_args()
+        return cli.parse_args()
 
 
 class BackendTests(unittest.TestCase):
@@ -52,10 +53,10 @@ class BackendTests(unittest.TestCase):
 
     def test_diagnostic_can_run_without_video_paths(self):
         with patch.object(sys, "argv", ["auto_reframe.py", "--diagnose-env"]):
-            self.assertTrue(app.parse_args().diagnose_env)
+            self.assertTrue(cli.parse_args().diagnose_env)
         with patch.object(sys, "argv", ["auto_reframe.py"]), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
-                app.parse_args()
+                cli.parse_args()
 
     def test_invalid_frame_limit_rejected(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -76,7 +77,7 @@ class ProcessOutputTests(unittest.TestCase):
         command = [sys.executable, "-u", "-c",
                    "import sys; print('early error', file=sys.stderr, flush=True); sys.stdin.readline()"]
         with contextlib.redirect_stderr(stream):
-            process, stderr = app.start_ffmpeg(command, stdin=subprocess.PIPE)
+            process, stderr = video_io.start_ffmpeg(command, stdin=subprocess.PIPE)
             try:
                 self.assertTrue(ready.wait(5), "stderr was buffered until process exit")
                 self.assertIsNone(process.poll())
@@ -97,7 +98,7 @@ class ProcessOutputTests(unittest.TestCase):
         command = [sys.executable, "-u", "-c",
                    "import sys; sys.stderr.write('x'*300000+'\\nFINAL ERROR\\n'); sys.exit(7)"]
         with contextlib.redirect_stderr(stream):
-            result = app.run_ffmpeg(command, timeout=5)
+            result = video_io.run_ffmpeg(command, timeout=5)
         self.assertEqual(result.returncode, 7)
         self.assertGreater(len(stream.getvalue()), 300000)
         self.assertLessEqual(len(result.stderr), 6000)
@@ -108,17 +109,17 @@ class ProcessOutputTests(unittest.TestCase):
         command = [sys.executable, "-u", "-c",
                    "import sys,time; print('before timeout', file=sys.stderr, flush=True); time.sleep(30)"]
         with contextlib.redirect_stderr(stream), self.assertRaises(subprocess.TimeoutExpired):
-            app.run_ffmpeg(command, timeout=1)
+            video_io.run_ffmpeg(command, timeout=1)
         self.assertIn("before timeout", stream.getvalue())
 
     def test_hevc_preflight_uses_requested_encoder_and_logs_fallback(self):
         args = arguments("--video-encoder", "hevc_nvenc", "--ffmpeg-log-level", "info")
         outcomes = [subprocess.CompletedProcess([], 1, stderr="driver error"),
                     subprocess.CompletedProcess([], 0, stderr="")]
-        with patch.object(app, "has_ffmpeg_encoder", return_value=True), \
-                patch.object(app, "run_ffmpeg", side_effect=outcomes) as run, \
+        with patch.object(video_io, "has_ffmpeg_encoder", return_value=True), \
+                patch.object(video_io, "run_ffmpeg", side_effect=outcomes) as run, \
                 self.assertLogs(level="WARNING") as logs:
-            self.assertEqual(app.select_live_encoder(args, 30, (320, 240), None), "libx264")
+            self.assertEqual(video_io.select_live_encoder(args, 30, (320, 240), None), "libx264")
         command = run.call_args_list[0].args[0]
         self.assertEqual(command[command.index("-c:v") + 1], "hevc_nvenc")
         self.assertEqual(command[command.index("-loglevel") + 1], "info")
@@ -140,7 +141,7 @@ class EncodingSmokeTests(unittest.TestCase):
             source = Path(directory) / "source.mkv"
             output = Path(directory) / "output.mp4"
             frame = np.zeros((64, 64, 3), dtype=np.uint8)
-            writer = app.LosslessWriter(str(source), 2, (64, 64))
+            writer = video_io.LosslessWriter(str(source), 2, (64, 64))
             try:
                 writer.write(frame)
                 writer.write(frame)
@@ -148,13 +149,13 @@ class EncodingSmokeTests(unittest.TestCase):
             finally:
                 writer.abort()
             muxed = Path(directory) / "muxed.mp4"
-            encoder = app.run_ffmpeg_mux(str(source), str(source), str(muxed), "libx264",
-                                         "192k", 18, "medium", app.build_video_filters(True))
+            encoder = video_io.run_ffmpeg_mux(str(source), str(source), str(muxed), "libx264",
+                                         "192k", 18, "medium", video_io.build_video_filters(True))
             self.assertEqual(encoder, "libx264")
             self.assertTrue(muxed.is_file())
             args = arguments("--video-encoder", "libx264")
-            writer = app.DirectVideoWriter(output, source, 2, (64, 64), args,
-                                           app.build_video_filters(True))
+            writer = video_io.DirectVideoWriter(output, source, 2, (64, 64), args,
+                                           video_io.build_video_filters(True))
             try:
                 writer.write(frame)
                 writer.write(frame)

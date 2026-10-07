@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-
 CLASS_IDS = {
     "person": 0,
     "bicycle": 1,

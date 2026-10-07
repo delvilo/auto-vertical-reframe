@@ -64,5 +64,3 @@ def critically_damped_step(current, target, velocity, dt, tau, max_speed):
     if (target - current) * (target - value) <= 0:
         return target, 0.0
     return value, clamp(new_velocity, -max_speed, max_speed)
-
-

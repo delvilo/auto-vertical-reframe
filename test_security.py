@@ -11,12 +11,12 @@ for mod in ['cv2', 'scenedetect', 'ultralytics']:
         except ImportError:
             sys.modules[mod] = MagicMock()
 
-import auto_reframe
+from reframe.saliency.backends import deepgazemr as backend
 
 class TestSecurityFix(unittest.TestCase):
-    @patch("auto_reframe.torch")
+    @patch("reframe.saliency.backends.deepgazemr.torch")
     def test_torch_load_weights_only(self, mock_torch):
-        helper = auto_reframe.DeepGazeMRSaliencyHelper()
+        helper = backend.DeepGazeMRSaliencyHelper()
 
         # Mock torch.hub.load to fail on first attempt to trigger cached repo fallback
         mock_torch.hub.load.side_effect = [Exception("Hub load failed"), MagicMock()]
@@ -47,7 +47,7 @@ class TestSecurityFix(unittest.TestCase):
 
         mock_torch.load.side_effect = [mock_checkpoint_dict, mock_center_bias]
 
-        with patch("auto_reframe.Path") as mock_path_cls:
+        with patch("reframe.saliency.backends.deepgazemr.Path") as mock_path_cls:
             mock_path_cls.return_value = mock_hub_dir
             res = helper._load_model()
 
@@ -60,3 +60,4 @@ class TestSecurityFix(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

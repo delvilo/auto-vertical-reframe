@@ -1,4 +1,4 @@
-import argparse
+from reframe.config import AppConfig
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
@@ -10,8 +10,8 @@ for mod in ['cv2', 'scenedetect', 'ultralytics']:
         except ImportError:
             sys.modules[mod] = MagicMock()
 
-import auto_reframe
-from auto_reframe import DeepGazeMRSaliencyHelper, build_saliency_helper
+from reframe.saliency.backends.deepgazemr import DeepGazeMRSaliencyHelper
+from reframe.saliency.factory import build_saliency_helper
 
 
 class TestSecurityReframe(unittest.TestCase):
@@ -21,7 +21,7 @@ class TestSecurityReframe(unittest.TestCase):
         helper = DeepGazeMRSaliencyHelper()
         self.assertFalse(helper.trust_repo)
 
-    @patch("auto_reframe.torch")
+    @patch("reframe.saliency.backends.deepgazemr.torch")
     def test_load_model_passes_trust_repo_false_by_default(self, mock_torch):
         """Verify torch.hub.load is called with trust_repo=False by default."""
         mock_torch.hub.load.side_effect = Exception("Trust refused")
@@ -40,7 +40,7 @@ class TestSecurityReframe(unittest.TestCase):
             trust_repo=False,
         )
 
-    @patch("auto_reframe.torch")
+    @patch("reframe.saliency.backends.deepgazemr.torch")
     def test_load_model_passes_trust_repo_true_when_configured(self, mock_torch):
         """Verify torch.hub.load is called with trust_repo=True when trust_repo=True."""
         mock_model = MagicMock()
@@ -52,7 +52,9 @@ class TestSecurityReframe(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertFalse(helper._disabled)
-        self.assertEqual(helper.active_backend, "deepgazemr")
+        self.assertTrue(helper.model_loaded)
+        # Loading is not yet a neural prediction (the temporal window is empty).
+        self.assertEqual(helper.active_backend, "handcrafted")
 
         mock_torch.hub.load.assert_called_once_with(
             "mtangemann/deepgazemr",
@@ -63,7 +65,7 @@ class TestSecurityReframe(unittest.TestCase):
 
     def test_build_saliency_helper_passes_trust_repo_arg(self):
         """Verify build_saliency_helper forwards saliency_trust_repo from CLI args."""
-        args_false = argparse.Namespace(
+        args_false = AppConfig(
             saliency_model="deepgazemr",
             saliency_device="cpu",
             saliency_max_side=384,
@@ -76,7 +78,7 @@ class TestSecurityReframe(unittest.TestCase):
         sampled = build_saliency_helper(args_false)
         self.assertFalse(sampled.backend.trust_repo)
 
-        args_true = argparse.Namespace(
+        args_true = AppConfig(
             saliency_model="deepgazemr",
             saliency_device="cpu",
             saliency_max_side=384,

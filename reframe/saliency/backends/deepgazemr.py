@@ -12,7 +12,6 @@ from reframe.saliency.base import SaliencyBackend
 from reframe.saliency.backends.handcrafted import HandcraftedSaliencyHelper
 
 
-
 class DeepGazeMRSaliencyHelper(SaliencyBackend):
     """Neural video saliency helper leveraging DeepGaze MR via PyTorch Hub."""
 
