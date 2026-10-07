@@ -38,7 +38,8 @@ Naive center-cropping loses the subject the moment they move. Manual reframing i
 - Debug preview export for inspecting crop decisions frame-by-frame.
 
 
-Core logic lives in `auto_reframe.py` as a single pipeline with `Candidate`, `CameraObservation`, and `CameraState` dataclasses.
+`auto_reframe.py` is a thin compatible entry point. The installed `reframe` package
+separates perception, saliency, composition, and video I/O; see [Architecture](#architecture).
 
 ## Tech Stack
 
@@ -55,8 +56,8 @@ Python 3.11+ and an external `ffmpeg` executable are required. Install Python pa
 with the interpreter that will run the application:
 
 ```bash
-python3 -m pip install -r requirements.txt
-python3 auto_reframe.py input.mp4 output.mp4 --device auto
+python3 -m pip install -e .
+auto_reframe.py input.mp4 output.mp4 --device auto
 ```
 
 `requirements.txt` pins Ultralytics to the version observed in the working Colab
@@ -81,7 +82,13 @@ A fresh GPU environment needs a matching CUDA-enabled PyTorch/torchvision instal
 3. 使用暫存 constraints 保留現有 torch／torchvision 的完整版本（含 `+cu130` 等標記）；
    若依賴不相容會停止並顯示錯誤。
 4. 在新 Python 程序驗證套件可匯入、MediaPipe 已不可匯入，印出版本與 CUDA 狀態。
-5. 將新版程式安裝到 `/usr/local/bin/auto_reframe.py`。
+5. 用 editable 模式安裝完整 `reframe` 套件與 `auto_reframe.py` 命令。
+   Colab 會在 `/usr/local/bin` 產生命令入口，影片可以放在其他目錄。
+
+拆分後不能再只 `cp auto_reframe.py /usr/local/bin/`。請保留 checkout；
+editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程序即可使用新程式。
+如 `requirements.txt` 或套件設定有變更，需重新執行安裝程式。
+也可在 checkout 使用 `python3 auto_reframe.py`，或安裝後使用 `python3 -m reframe`。
 
 每個 pip 子程序都保留 stdout、stderr，失敗時安裝會停止。
 不移除其他程式共用的 TensorFlow／protobuf 等依賴。
@@ -145,6 +152,77 @@ python3 -u /usr/local/bin/auto_reframe.py \
 Summary 另外列出 `frames_with_head_cues`、`frames_with_pose`、
 `pose_rois_inferred`、`pose_rois_matched`、`pose_cache_hits`。
 `frames_with_head_cues` 不可直接當作舊版的「人臉偵測率」。
+
+### 第一階段草稿分支：Colab 同步驗證
+
+此分支先發布重構，再補測試結果。請先確認 checkout 沒有尚未保存的修改；
+以下命令會在有衝突時停止，不會使用強制覆寫：
+
+```bash
+%%bash
+set -euo pipefail
+cd /content/auto-vertical-reframe
+git fetch origin codex/modular-saliency-stage1
+git switch codex/modular-saliency-stage1 || git switch --track origin/codex/modular-saliency-stage1
+git merge --ff-only origin/codex/modular-saliency-stage1
+git rev-parse HEAD
+python3 -u install_colab.py
+```
+
+在影片目錄執行（stdout、stderr 與失敗狀態都保留）：
+
+```bash
+%%bash
+set -euo pipefail
+python3 -u /usr/local/bin/auto_reframe.py \
+  'vv110.mp4' 'vv110V_modular_test.mp4' \
+  --seg-model yolo26n-seg.pt --pose-model yolo26n-pose.pt --device 0 \
+  --lock-first-subject --dead-zone 0.15 --post-restore \
+  --video-encoder hevc_nvenc --max-frames 90 \
+  --native-debug --log-level DEBUG --ffmpeg-log-level info \
+  2>&1 | tee /content/reframe-modular-test.log
+```
+
+日誌會列出套件路徑、版本、所有 Python 模組 SHA256 與整體指紋，
+可辨識 editable checkout 實際使用的程式。除了 GPU 與編碼器，也請確認畫面構圖、
+音畫同步、scene resets、subject switches 與原版比較。實際 T4／權重測試需在 Colab 執行。
+
+## Architecture
+
+| Module | Responsibility |
+| --- | --- |
+| `reframe/cli.py`, `config.py` | Native diagnostics before heavy imports; CLI parsing into typed `AppConfig`, defaults and validation |
+| `contracts.py`, `geometry.py` | Frame/track/pose/saliency data contracts, camera state and shared geometry |
+| `perception/segmentation.py`, `pose.py` | Segmentation/tracking, compact mask statistics, batched pose inference and cue cache |
+| `saliency/base.py`, `factory.py`, `backends/` | One backend lifecycle: `load`, `observe`, `predict`, `reset`, `close`, `telemetry` |
+| `saliency/service.py`, `scheduler.py`, `cache.py`, `regions.py` | Every-frame ingestion, fixed refresh policy, optical-flow/EMA map alignment, saliency regions |
+| `subjects.py`, `camera.py` | Candidate enrichment/ranking, subject selection, framing and smoothed camera motion |
+| `scenes.py`, `video_io.py`, `debug.py`, `runtime.py` | Scene cuts, decoding/encoding and live stderr, overlay, devices and diagnostics |
+| `pipeline.py` | Resource ownership and single-pass orchestration |
+
+Each frame runs segmentation, pose observation, saliency, candidate ranking, then
+camera composition and encoding. Ranking consumes observations and never calls a
+model. `argparse.Namespace` stays out of the processing layers.
+
+`FrameContext` uses one-based frame indices, `(index - 1) / fps` nominal timestamps,
+original width/height and scene index. `PoseObservation` retains all 17 `(x,y,confidence)`
+points on CPU, the original inference points/context, remapped current points/context,
+track ID and `inferred`/`remapped` source. Missing poses are recorded too, so cached
+misses do not look like a new inference. Remapping never advances the inference time.
+
+Saliency backends receive resized BGR uint8 images and return finite 2-D float32
+maps in `[0,1]`, spanning the whole input image. The service retains original geometry
+and inference time separately from the frame to which flow aligns the map. `source`
+distinguishes refresh, EMA and propagation; backend/status identify the last refresh
+and report handcrafted warmup/fallback truthfully. EMA may include older map content.
+
+The scheduler still refreshes on scene frames 1, 4, 7, ... by default. Every frame
+reaches `observe`, including skipped predictions, preserving DeepGaze MR's temporal
+window. A scene cut clears tracking/pose/map/temporal state. `ExitStack` closes models,
+saliency state, frame decoding and encoder processes on success, error or interruption.
+
+Phase 1 retains handcrafted and DeepGaze MR only. DeepGaze MSDB, ViNet and
+pose-driven adaptive scheduling are future work. SAM2 is not a dependency or backend.
 
 `--native-debug` 在匯入 PyTorch 前啟用 `TORCH_SHOW_CPP_STACKTRACES=1` 與
 Python faulthandler，並印出採用的設定及 PyTorch build 資訊。
