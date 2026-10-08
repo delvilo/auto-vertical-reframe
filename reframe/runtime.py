@@ -83,7 +83,8 @@ def diagnose_environment(args) -> int:
     for key in ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "LD_PRELOAD"):
         logging.info("%s=%s", key, os.environ.get(key, "<unset>"))
     for name in ("torch", "torchvision", "ultralytics", "scenedetect", "lap",
-                 "numpy", "opencv-python", "opencv-contrib-python", "opencv-python-headless"):
+                 "numpy", "opencv-python", "opencv-contrib-python", "opencv-python-headless",
+                 "deepgaze-pytorch", "clip", "einops"):
         try:
             logging.info("Package %s=%s", name, importlib.metadata.version(name))
         except importlib.metadata.PackageNotFoundError:
