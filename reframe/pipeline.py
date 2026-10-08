@@ -7,7 +7,6 @@ import shutil
 import tempfile
 from contextlib import ExitStack
 from pathlib import Path
-from time import perf_counter
 import cv2
 from reframe.config import AppConfig, CLASS_IDS
 from reframe.contracts import CameraState, FrameContext
@@ -27,7 +26,6 @@ from reframe.debug import draw_debug
 
 
 def process_video(args: AppConfig) -> None:
-    started = perf_counter()
     input_path = Path(args.input)
     output_path = Path(args.output)
     if input_path.resolve() == output_path.resolve():
@@ -211,11 +209,7 @@ def process_video(args: AppConfig) -> None:
                     stats["scene_resets"] += 1
                     last_subject_key = None
 
-                _, view_crop_h = current_crop_size(
-                    base_crop_w, base_crop_h, args.fixed_zoom or state.zoom, frame_w, frame_h
-                )
-                context = FrameContext(frame_idx, (frame_idx - 1) / fps, frame_w, frame_h,
-                                       scene_index, view_crop_h)
+                context = FrameContext(frame_idx, (frame_idx - 1) / fps, frame_w, frame_h, scene_index)
                 observations = observe_poses(frame, tracks, pose_helper, state, context, args.cue_top_k)
                 saliency = saliency_helper.process(frame, observations)
                 saliency_map = saliency.map
@@ -525,10 +519,7 @@ def process_video(args: AppConfig) -> None:
                     )
 
             saliency_telemetry = saliency_helper.telemetry()
-            elapsed = perf_counter() - started
             summary = {
-                "wall_seconds": elapsed,
-                "processing_fps": stats["frames_processed"] / elapsed if elapsed else None,
                 "preset": args.preset,
                 "frames_processed": stats["frames_processed"],
                 "scene_resets": stats["scene_resets"],

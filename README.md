@@ -7,7 +7,7 @@ Scene-aware vertical auto-reframe CLI that turns horizontal footage into 9:16 vi
 - Tracks people, pets, and vehicles through scene cuts with YOLO26 segmentation and ByteTrack.
 - Head-, pose-, and saliency-aware framing with a subject ranking model and smoothed camera path.
 - Four tuned presets (`talking_head`, `sports`, `pets`, `cars`) with sensible zoom and motion limits.
-- Full-frame DeepGaze MSDB spatial saliency by default, with configurable MIT1003/uniform centre bias.
+- DeepGaze MR saliency by default, using a rolling window of 16 frames.
 
 ## Overview
 
@@ -21,9 +21,9 @@ Naive center-cropping loses the subject the moment they move. Manual reframing i
 - YOLO26 instance segmentation with configurable classes and confidence.
 - YOLO26n-pose COCO-17 keypoints with conservative head estimates and batched person ROIs.
 - Two-person framing mode when a second subject crosses a spatial threshold.
-- `deepgazemsdb` uses original-size frames, RGB 0–255 input and generalization parameters (`dataset=None`).
-- Explicit `handcrafted` remains available; `auto` permits logged handcrafted fallback.
-- Default MSDB failures stop with a traceback; no hidden CPU fallback or automatic downscaling.
+- `deepgazemr` is the default saliency backend, with the restored phase-1 temporal window.
+- Explicit `handcrafted` saliency remains available for the original baseline.
+- Automatic fallback from `deepgazemr` to `handcrafted` if model loading or inference fails.
 - Saliency telemetry in logs and final summary: requested backend, active backend, model loaded state, fallback frames, and device.
 - Subject lock, min/max zoom, max step-per-frame, and per-axis motion damping.
 - Post-processing via ffmpeg: configurable encoder, CRF, audio bitrate, and optional unsharp/denoise pass.
@@ -35,7 +35,7 @@ separates perception, saliency, composition, and video I/O; see [Architecture](#
 
 ## Tech Stack
 
-- **Language:** Python 3.11+
+- **Language:** Python 3.13+
 - **Detection & tracking:** Ultralytics YOLO26, ByteTrack (`lap`)
 - **Pose & head cues:** YOLO26n-pose (`yolo26n-pose.pt`)
 - **Scene detection:** PySceneDetect
@@ -44,12 +44,12 @@ separates perception, saliency, composition, and video I/O; see [Architecture](#
 
 ## Quick Start
 
-Python 3.11+ and an external `ffmpeg` executable are required. Install Python packages
+Python 3.13+ and an external `ffmpeg` executable are required. Install Python packages
 with the interpreter that will run the application:
 
 ```bash
 python3 -m pip install -e .
-auto_reframe.py input.mp4 output.mp4 --device auto
+auto_reframe.py input.mp4 output.mp4 --device auto --saliency-trust-repo
 ```
 
 `requirements.txt` pins Ultralytics to the version observed in the working Colab
@@ -58,6 +58,10 @@ provider (`opencv-python`); installing headless/contrib providers alongside it c
 overwrite the same `cv2` files. PyTorch/torchvision requirements accept compatible
 CUDA builds already present in Colab. FFmpeg and NVIDIA drivers are not pip packages.
 A fresh GPU environment needs a matching CUDA-enabled PyTorch/torchvision installation.
+
+後續開發以 **Python 3.13+** 為相容基準，套件 metadata 也設定 `requires-python >=3.13`。
+不要求支援 Python 3.12 或更舊版本；後續套件、CUDA build 與新 Python 版本仍需實測。
+這項基準記錄在 [AGENTS.md](AGENTS.md)，供以後的程式改動遵循。
 
 ### Colab：從 MediaPipe 遷移
 
@@ -113,96 +117,41 @@ editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程�
 官方模型首次使用時自動下載；離線執行請預先準備兩個 `.pt` 權重。
 姿態模型只在允許的類別包含 `person` 時載入。
 
-### 第二階段：DeepGaze MSDB
+### DeepGaze MR：回復的顯著性後端
 
-MSDB 已取代 MR 並成為預設顯著性後端。預設使用 **MIT1003 center bias**，
-模型資料集參數仍為 **`dataset=None`**（各資料集平均參數）；這兩項設定彼此獨立。
-授權狀態記錄為 **尚未確認**，詳見 [第三方模型說明](THIRD_PARTY_MODELS.md)。
-模型授權獨立於本專案；不將未確認的授權標示為 MIT 或可商用。
+版本 0.2.1 撤回第二階段 MSDB 更新，保留第一階段的模組拆分及統一後端介面，
+預設選擇 `deepgazemr`。安裝依賴恢復為 MR 路徑，不再要求 DeepGaze MSDB、CLIP 或 einops。
+MSDB 的 MIT1003／uniform、螢幕尺寸、觀看距離及 PPD 參數已撤回。
 
-| 參數 | 預設／用途 |
+| 設定 | 行為 |
 | --- | --- |
-| `--saliency-model` | `deepgazemsdb`；另可選 `handcrafted`、允許回退的 `auto` |
-| `--saliency-center-bias` | `mit1003`；可選 `uniform`，uniform 不下載 MIT1003 範本 |
-| `--saliency-screen-inches` | `24`；16:9 螢幕旋轉為 9:16 後的對角線尺寸 |
-| `--saliency-viewing-distance-cm` | `60` |
-| `--saliency-pixel-per-dva` | 預設由螢幕與裁切比例計算；指定時表示**原始輸入影格**每度視角的像素數 |
-| `--saliency-device` | `auto`；指定 `cuda` 而 CUDA 不可用會報錯 |
-| `--saliency-amp` | 預設關閉，FP32 基準；可明確選擇 CUDA FP16 |
-| `--saliency-interval` | 保留既有 `3`；以 `1` 逐幀推論 |
-| `--saliency-max-side` | 僅供 handcrafted 使用；對 MSDB 不做縮圖 |
+| `--saliency-model` | 預設 `deepgazemr`；另可選 `auto`、`handcrafted` |
+| `--saliency-trust-repo` | 首次使用時明確允許載入固定的 `mtangemann/deepgazemr` Hub 程式碼 |
+| `--saliency-device` | `auto`；Colab 測試明確指定 `cuda`，並檢查 Summary 的實際裝置 |
+| `--saliency-max-side` | `384`；4K 16:9 來源約縮為 384×216，再送入 MR |
+| `--saliency-interval` | `3`；每個影格仍加入時間視窗，推論才依固定間隔執行 |
+| `--saliency-amp` | 保留第一階段預設開啟；以下 MR 基準測試明確關閉以測 FP32 |
+| MR center bias | 官方預訓練模型隨附的 LEDOV prior |
 
-MSDB 收到原始大小的完整 BGR 影格，轉成 RGB、float32，數值維持 0–255；
-不先縮圖、不除以 255。內建 CLIP/DINOv2、多尺度處理和模型正規化保持上游行為。
-MSDB 是單張影像模型，第一幀即可推論；舊 MR 的 16 幀暖機、緩衝區和 Hub loader 已移除。
-`--saliency-model deepgazemr` 與 `--saliency-trust-repo` 不再接受。
+MR 保留目前與前 15 幀的 RGB 影像，形成 `[16,3,H,W]` 輸入。選定 CUDA 時，
+裝置 ring 使用 32 個槽位，保存同一組 16 幀的鏡像副本；場景切換會重設視窗。
+官方 MR 將 VGG19 多幀特徵取平均，沒有接收額外的 optical flow。
+本程式的 OpenCV 光流在 CPU 上平移顯著圖快取。前 15 幀使用 handcrafted 暖機；
+模型載入或推論失敗也會保留 warning／traceback 並回退，因此必須檢查實際後端。
 
-觀看尺度假設影片完整呈現在直立螢幕中，依比例縮放、不拉伸；1080×1920 會填滿 9:16 螢幕。
-以畫面中央的一度視角計算，24 吋／60 公分約為 **37.8435 輸出像素／度**。
-輸入模型的數值為：
+`saliency_frames_fallback` 沿用舊版計數，包含暖機推論；interval=3 時，前 15 幀
+通常會計入 5 次。不要要求該數字一律為 0。MR 成功測試應顯示
+`saliency_model_loaded=true`、`saliency_frames_backend>0`、最後的
+`saliency_active_backend=deepgazemr`，且裝置為 CUDA。至少測試 16 幀。
 
-```text
-input_pixel_per_dva = output_pixel_per_dva × view_crop_height / output_height
-```
-
-Colab log 中的原始影片為 **3840×2160、60 fps**；保留完整 2160 高度時，約為
-**42.5739 原始像素／度**。若來源為 1920×1080、保留 1080 高度，則約為 21.2869。
-裁切高度降至 540 時，約為 10.6435。這是採用指定播放條件的工程近似，尚未用眼動資料校準。
-顯著性計算先於本幀構圖，因此使用**更新構圖前的鏡頭裁切高度**；固定 zoom 則使用指定倍率，
-場景切換使用重設後的鏡頭狀態。模型的完整影格還包括最終裁切之外的區域。
-`--saliency-pixel-per-dva` 可直接覆寫此近似值，且不隨 zoom 變動。
-
-首次執行會下載 CLIP、DINOv2、MSDB head 與 MIT1003 範本；`requirements.txt`
-固定 DeepGaze、OpenAI CLIP 的來源 commit，DINO 也使用固定 commit。
-安裝完成不代表權重已下載；離線使用前須完成一次模型載入。
-
-完整影格與觀看尺度會影響 MSDB 內部多尺度的大小，**尚未保證能放入 T4 顯存**。
-發生 CUDA OOM、載入失敗或非有限預測時，預設會保留 traceback 並失敗退出，
-不偷偷縮圖、不切 CPU、不改用其他模型。只有指定 `--saliency-model auto` 才會記錄並回退
-到 handcrafted；不要把這種輸出當成 MSDB 成功測試。
-
-先依下方同步步驟取得 `codex/modular-saliency-stage1` 分支的 **0.3.0** 版本，
-重新執行 `install_colab.py`。以下 cell 先測 3 幀，再測 90 幀；前者失敗時會停止，
-不執行長測試。保留第一階段的 interval=3，便於同條件比較；不縮小來源影格。
-
-```bash
-%%bash
-set -euo pipefail
-cd /content/drive/MyDrive/video/1080p/crop
-
-for frames in 3 90; do
-  if [ "$frames" -eq 3 ]; then label=smoke; else label=test; fi
-  log="/content/reframe-msdb-${label}.log"
-  {
-    git -C /content/auto-vertical-reframe rev-parse HEAD
-    nvidia-smi
-    ffprobe -v error -select_streams v:0 \
-      -show_entries stream=width,height,avg_frame_rate,duration -of json vv110.mp4
-    python3 -u -m reframe \
-      vv110.mp4 "vv110V_msdb_${label}.mp4" \
-      --seg-model yolo26n-seg.pt --pose-model yolo26n-pose.pt --device 0 \
-      --lock-first-subject --dead-zone 0.15 --post-restore \
-      --video-encoder hevc_nvenc --max-frames "$frames" \
-      --saliency-model deepgazemsdb --saliency-device cuda \
-      --saliency-center-bias mit1003 \
-      --saliency-screen-inches 24 --saliency-viewing-distance-cm 60 \
-      --saliency-interval 3 --no-saliency-amp \
-      --native-debug --log-level DEBUG --ffmpeg-log-level info
-    ffprobe -v error -count_frames \
-      -show_entries stream=index,codec_type,codec_name,width,height,avg_frame_rate,nb_read_frames,duration \
-      -of json "vv110V_msdb_${label}.mp4"
-  } 2>&1 | tee "$log"
-done
-```
-
-比較 uniform 時，只改 `--saliency-center-bias uniform`，並更換影片／log 檔名。
-檢查 `MSDB actual input` 是否為原始解析度，以及 Summary 的
-`saliency_active_backend=deepgazemsdb`、`saliency_frames_fallback=0`。
-Summary 同時列出全程 `wall_seconds`、`processing_fps`、模型載入時間、累計推論時間，
-以及 CUDA allocator 的程序峰值（包含同程序 YOLO，並非整張 GPU 的使用量）。
-推論時間包含張量搬移及輸出同步，載入／下載另計；第一次推論也包含在統計中。
-比較速度時須固定影片、zoom、精度與 interval，並區分首次下載與快取已存在的執行。
-本階段不新增姿態驅動的跳幀或其他速度優化。
+384×216 與 768×432 都可用於 16:9 來源。`--saliency-max-side 768` 會保留更多
+小人物／細小目標細節，但不保證更好的顯著性或裁切：輸入尺度也會改變物體相對於
+VGG 感受野的大小，以及 MR 固定像素平滑的相對範圍。寬、高各加倍後像素數為 4 倍，
+主要卷積運算及中間特徵儲存量約隨之增加；整體時間與峰值顯存須在 T4 上實測。
+此參數只改 MR 輸入，不改 YOLO 推論或輸出影片解析度。預設先保留 384；若比較 768，
+請使用相同片段與其他參數，另存輸出影片與 log，檢查主角保留率、切換與鏡頭抖動。
+官方輸入及模型說明見 [DeepGaze MR](https://github.com/mtangemann/deepgazemr)；
+此次 Python 3.13+ 測試結果及 Colab 待驗證範圍見 [MR_VALIDATION.md](MR_VALIDATION.md)。
 
 ### Colab T4：診斷與短片驗證
 
@@ -213,7 +162,7 @@ Summary 同時列出全程 `wall_seconds`、`processing_fps`、模型載入時�
 ```
 
 此模式列出 Python、套件與 GPU，執行 CUDA 矩陣乘法、卷積與兩幀 NVENC 測試。
-它不代表模型已實測。以下 cell 明確選擇 handcrafted，重現第一階段基準並測試 90 幀，同步保留 terminal 輸出、
+它不代表模型已實測。以下 cell 明確使用 handcrafted 重現第一階段基準，測試 90 幀，同步保留 terminal 輸出、
 日誌和失敗狀態；請在影片所在目錄執行：
 
 ```bash
@@ -236,11 +185,9 @@ Summary 另外列出 `frames_with_head_cues`、`frames_with_pose`、
 `pose_rois_inferred`、`pose_rois_matched`、`pose_cache_hits`。
 `frames_with_head_cues` 不可直接當作舊版的「人臉偵測率」。
 
-### 草稿 PR #29：Colab 同步與安裝
+### 草稿 PR #29：Colab 同步與 MR 驗證
 
-此分支整合第一階段模組拆分與第二階段 MSDB 更新。完整套件版本為 0.3.0；
-不能只複製入口 script。第一階段的實測結果見 [COLAB_VALIDATION.md](COLAB_VALIDATION.md)。
-請先確認 checkout 沒有尚未保存的修改；
+此分支保留第一階段重構，已撤回 MSDB，套件版本為 0.2.1。請先確認 checkout 沒有尚未保存的修改；
 以下命令會在有衝突時停止，不會使用強制覆寫：
 
 ```bash
@@ -253,26 +200,31 @@ set -euo pipefail
   git merge --ff-only origin/codex/modular-saliency-stage1
   git rev-parse HEAD
   python3 -u install_colab.py
-} 2>&1 | tee /content/reframe-msdb-install.log
+} 2>&1 | tee /content/reframe-mr-install.log
 ```
 
-更新後請執行上方 MSDB 測試 cell。若要重現第一階段基準，在影片目錄執行：
+在影片目錄執行（stdout、stderr 與失敗狀態都保留）：
 
 ```bash
 %%bash
 set -euo pipefail
-python3 -u /usr/local/bin/auto_reframe.py \
-  'vv110.mp4' 'vv110V_modular_test.mp4' --saliency-model handcrafted \
+cd /content/drive/MyDrive/video/1080p/crop
+python3 -u -m reframe \
+  'vv110.mp4' 'vv110V_mr_test.mp4' \
   --seg-model yolo26n-seg.pt --pose-model yolo26n-pose.pt --device 0 \
   --lock-first-subject --dead-zone 0.15 --post-restore \
   --video-encoder hevc_nvenc --max-frames 90 \
+  --saliency-model deepgazemr --saliency-device cuda --saliency-trust-repo \
+  --saliency-max-side 384 --saliency-interval 3 --no-saliency-amp \
   --native-debug --log-level DEBUG --ffmpeg-log-level info \
-  2>&1 | tee /content/reframe-modular-test.log
+  2>&1 | tee /content/reframe-mr-test.log
 ```
 
 日誌會列出套件路徑、版本、所有 Python 模組 SHA256 與整體指紋，
 可辨識 editable checkout 實際使用的程式。除了 GPU 與編碼器，也請確認畫面構圖、
 音畫同步、scene resets、subject switches 與原版比較。實際 T4／權重測試需在 Colab 執行。
+上一份成功的 90 幀 Colab log 使用 handcrafted，不能當作 MR 已成功運行的證據。
+請檢查上方列出的 MR Summary 欄位，再回傳 `/content/reframe-mr-test.log`。
 
 ## Architecture
 
@@ -297,24 +249,21 @@ points on CPU, the original inference points/context, remapped current points/co
 track ID and `inferred`/`remapped` source. Missing poses are recorded too, so cached
 misses do not look like a new inference. Remapping never advances the inference time.
 
-Saliency backends receive BGR uint8 images (original resolution for MSDB, reduced
-resolution for handcrafted) and return finite 2-D float32
+Saliency backends receive resized BGR uint8 images and return finite 2-D float32
 maps in `[0,1]`, spanning the whole input image. The service retains original geometry
 and inference time separately from the frame to which flow aligns the map. `source`
 distinguishes refresh, EMA and propagation; backend/status identify the last refresh
-and report an explicit `auto` fallback truthfully. EMA may include older map content.
+and report handcrafted warmup/fallback truthfully. EMA may include older map content.
 
 The scheduler still refreshes on scene frames 1, 4, 7, ... by default. Every frame
-reaches `observe`, including skipped predictions. MSDB is spatial and needs no
-16-frame warmup or temporal ring. A scene cut clears tracking/pose/map/temporal state. `ExitStack` closes models,
+reaches `observe`, including skipped predictions, preserving DeepGaze MR's temporal
+window. A scene cut clears tracking/pose/map/temporal state. `ExitStack` closes models,
 saliency state, frame decoding and encoder processes on success, error or interruption.
 
-Phase 2 replaces the MR backend with MSDB. ViNet and SAM2 are excluded.
-Pose-driven adaptive scheduling and speed optimizations remain future work.
+The active saliency backends are DeepGaze MR and handcrafted. The MSDB model update
+was withdrawn. Pose-driven adaptive scheduling remains a separate future step.
 
 ### Local regression checks
-
-The local phase-2 results and their limits are recorded in [MSDB_VALIDATION.md](MSDB_VALIDATION.md).
 
 After installing dependencies, run:
 
@@ -329,7 +278,7 @@ saliency map geometry/flow/EMA, backend warmup/fallback, scene resets, cleanup o
 exceptions/interrupts, CLI bootstrap order and live FFmpeg stderr. Video smoke tests
 use actual FFmpeg with controlled model outputs. Model weights and CUDA are not
 required for these checks; saliency numeric tests require real OpenCV. They do not
-replace the Colab T4/YOLO/NVENC or real DeepGaze MSDB validation.
+replace the Colab T4/YOLO/NVENC or real DeepGaze MR validation.
 
 `--native-debug` 在匯入 PyTorch 前啟用 `TORCH_SHOW_CPP_STACKTRACES=1` 與
 Python faulthandler，並印出採用的設定及 PyTorch build 資訊。
@@ -374,5 +323,4 @@ python auto_reframe.py input.mp4 output_fixed.mp4 \
 
 This implementation is derived from https://github.com/KazKozDev/auto-vertical-reframe
 
-Project code: MIT — see [LICENSE](LICENSE). Third-party model terms are separate;
-DeepGaze MSDB licensing remains unconfirmed — see [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md).
+MIT — see [LICENSE](LICENSE)

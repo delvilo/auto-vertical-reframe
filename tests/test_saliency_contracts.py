@@ -1,4 +1,5 @@
 """Backend scheduling/provenance tests. OpenCV is real; no model weights needed."""
+from contextlib import nullcontext
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +11,7 @@ from reframe.saliency.cache import SaliencyCache
 from reframe.saliency.service import SaliencyService
 from reframe.saliency.regions import extract_saliency_region
 from reframe.saliency.backends.handcrafted import HandcraftedSaliencyHelper
+from reframe.saliency.backends import deepgazemr
 
 
 def context(index, scene=1, width=128, height=64):
@@ -155,3 +157,52 @@ class SaliencyContractTests(unittest.TestCase):
         self.assertLessEqual(float(result.map.max()), 1 + 1e-6)
         backend.close()
         self.assertIsNone(backend.prev_gray_small)
+
+
+@unittest.skipIf(isinstance(cv2, MagicMock), "requires real OpenCV")
+class DeepGazeContractTests(unittest.TestCase):
+    def helper(self):
+        helper = deepgazemr.DeepGazeMRSaliencyHelper(device="cpu")
+        helper.model = MagicMock()
+        helper.model_loaded = helper.last_observation_ok = True
+        helper.ring_count = 1
+        helper.fallback.compute_map = MagicMock(return_value=np.zeros((64, 128), np.float32))
+        self.addCleanup(helper.close)
+        return helper
+
+    def test_warmup_and_disabled_fallback_identify_actual_backend(self):
+        helper = self.helper()
+        frame = np.zeros((64, 128, 3), np.uint8)
+        warmup = helper.predict(frame, context(1))
+        self.assertEqual((warmup.backend, warmup.status, warmup.reason),
+                         ("handcrafted", "warmup", "temporal_window"))
+        helper._disabled = True
+        fallback = helper.predict(frame, context(2))
+        self.assertEqual((fallback.backend, fallback.status), ("handcrafted", "fallback"))
+        self.assertEqual(helper.telemetry()["active_backend"], "handcrafted")
+
+    def test_neural_prediction_uses_observed_window_without_double_ingest(self):
+        helper = self.helper()
+        helper.ring_count = 16
+        helper.tensor_ring = np.zeros((32, 3, 8, 8), np.float32)
+        helper.model.return_value.detach.return_value.float.return_value.cpu.return_value.numpy.return_value = np.arange(64).reshape(8, 8) / 64
+        torch = MagicMock()
+        torch.inference_mode.side_effect = nullcontext
+        with patch.object(deepgazemr, "torch", torch), patch.object(helper, "observe_frame") as observe:
+            result = helper.predict(np.zeros((64, 128, 3), np.uint8), context(16))
+        observe.assert_not_called()
+        self.assertEqual((result.backend, result.status), ("deepgazemr", "predicted"))
+        self.assertEqual(helper.telemetry()["active_backend"], "deepgazemr")
+        self.assertEqual(result.map.shape, (64, 128))
+
+    def test_close_synchronizes_pending_copies_and_releases_buffers(self):
+        helper = self.helper()
+        event = MagicMock()
+        helper.copy_events = [event, None]
+        helper.tensor_ring = helper.host_ring = object()
+        helper.close()
+        helper.close()
+        event.synchronize.assert_called_once()
+        self.assertIsNone(helper.tensor_ring)
+        self.assertIsNone(helper.host_ring)
+        self.assertIsNone(helper.model)

@@ -12,7 +12,7 @@ from reframe.saliency.scheduler import FixedIntervalScheduler
 
 class SaliencyService:
     def __init__(self, backend: SaliencyBackend, interval: int = 3,
-                 max_side: int | None = 320, ema: float = 0.65):
+                 max_side: int = 320, ema: float = 0.65):
         self.backend = backend
         self.max_side = max_side
         self.scheduler = FixedIntervalScheduler(interval)
@@ -38,22 +38,19 @@ class SaliencyService:
             or context.frame_index <= previous.frame.frame_index
         ):
             self.reset()
-        if self.max_side is None:
-            model_frame = frame
-        else:
-            scale = min(1.0, self.max_side / max(h, w))
-            model_frame = cv2.resize(frame, (max(32, round(w * scale)), max(32, round(h * scale))),
-                                     interpolation=cv2.INTER_AREA)
-        gray = cv2.cvtColor(model_frame, cv2.COLOR_BGR2GRAY)
+        scale = min(1.0, self.max_side / max(h, w))
+        small = cv2.resize(frame, (max(32, round(w * scale)), max(32, round(h * scale))),
+                           interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         if not self._loaded:
             self.backend.load()
             self._loaded = True
         # Temporal backends must ingest even when their predictions are skipped.
-        self.backend.observe(model_frame, context)
+        self.backend.observe(small, context)
         self.total_frames += 1
         propagated = self.cache.propagate(gray)
         if self.scheduler.should_refresh(observations, missing=self.cache.result is None):
-            prediction = self.backend.predict(model_frame, context)
+            prediction = self.backend.predict(small, context)
             result = self.cache.refresh(prediction, context, propagated, gray.shape)
             self.refreshes += 1
         else:

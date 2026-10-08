@@ -85,13 +85,10 @@ class AppConfig:
     pose_conf: float = 0.25
     keypoint_conf: float = 0.35
     pose_batch_size: int = 4
-    saliency_model: str = 'deepgazemsdb'
+    saliency_model: str = 'deepgazemr'
     saliency_device: str = 'auto'
     saliency_max_side: int = 384
-    saliency_center_bias: str = 'mit1003'
-    saliency_screen_inches: float = 24.0
-    saliency_viewing_distance_cm: float = 60.0
-    saliency_pixel_per_dva: float | None = None
+    saliency_trust_repo: bool = False
     speaker_aware_mode: bool = False
     speaker_json: str = ''
     scene_threshold: float = 3.0
@@ -120,7 +117,7 @@ class AppConfig:
     retina_masks: bool = False
     saliency_interval: int = 3
     saliency_ema: float = 0.65
-    saliency_amp: bool = False
+    saliency_amp: bool = True
     scene_method: str = 'inline'
     scene_downscale: int = 4
     encode_mode: str = 'direct'
@@ -150,16 +147,6 @@ def validate_config(args: AppConfig) -> None:
         raise ValueError("pose-model requires a COCO-17 YOLO .pt checkpoint")
     if args.max_frames is not None and args.max_frames < 1:
         raise ValueError("max-frames must be >= 1")
-    if args.saliency_model not in {"auto", "deepgazemsdb", "handcrafted"}:
-        raise ValueError("saliency-model must be deepgazemsdb, handcrafted or auto")
-    if args.saliency_center_bias not in {"mit1003", "uniform"}:
-        raise ValueError("saliency-center-bias must be mit1003 or uniform")
-    for key in ("saliency_screen_inches", "saliency_viewing_distance_cm", "saliency_pixel_per_dva"):
-        value = getattr(args, key)
-        if value is not None and (not math.isfinite(value) or value <= 0):
-            raise ValueError(f"{key} must be finite and positive")
-    if args.saliency_max_side < 32:
-        raise ValueError("saliency-max-side must be >= 32 (handcrafted only)")
 
     if (
         args.saliency_interval < 1
