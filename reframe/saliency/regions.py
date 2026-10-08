@@ -6,11 +6,23 @@ from typing import Optional
 from reframe.geometry import clamp
 
 def extract_saliency_region(
-    saliency_map: np.ndarray,
+    saliency_map: np.ndarray | None,
     bounds: tuple[int, int, int, int],
     frame_shape: Optional[tuple[int, int]] = None,
+    map_bounds: Optional[tuple[int, int, int, int]] = None,
 ) -> Optional[tuple[float, float, float, float, float, float, float]]:
     """Returns center_x, center_y, left, top, right, bottom, confidence."""
+    if saliency_map is None:
+        return None
+    offset_x = offset_y = 0
+    if map_bounds is not None:
+        offset_x, offset_y, right, bottom = map_bounds
+        frame_shape = (bottom - offset_y, right - offset_x)
+        x1, y1, x2, y2 = bounds
+        if x2 <= offset_x or y2 <= offset_y or x1 >= right or y1 >= bottom:
+            return None
+        bounds = (max(x1, offset_x) - offset_x, max(y1, offset_y) - offset_y,
+                  min(x2, right) - offset_x, min(y2, bottom) - offset_y)
     h, w = saliency_map.shape[:2]
     sx = (frame_shape[1] / w) if frame_shape else 1.0
     sy = (frame_shape[0] / h) if frame_shape else 1.0
@@ -53,11 +65,11 @@ def extract_saliency_region(
     bottom = y1 + float(ys.max() + 1)
     confidence = clamp(weight_sum / max(1.0, roi.size), 0.0, 1.0)
     return (
-        center_x * sx,
-        center_y * sy,
-        left * sx,
-        top * sy,
-        right * sx,
-        bottom * sy,
+        center_x * sx + offset_x,
+        center_y * sy + offset_y,
+        left * sx + offset_x,
+        top * sy + offset_y,
+        right * sx + offset_x,
+        bottom * sy + offset_y,
         confidence,
     )

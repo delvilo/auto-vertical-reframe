@@ -63,10 +63,25 @@ assert seen
         self.assertEqual(args.pose_model, "yolo26n-pose.pt")
         self.assertEqual(args.seg_model, "yolo26n-seg.pt")
         self.assertEqual(args.saliency_interval, 3)
-        self.assertEqual(args.saliency_model, "deepgazemr")
+        self.assertFalse(hasattr(args, "saliency_model"))
+        self.assertIsNone(args.precrop)
+        self.assertFalse(args.post_restore)
         self.assertFalse(args.saliency_amp)
         self.assertEqual(args.dead_zone, .15)
         self.assertTrue(cli.parse_args(["--diagnose-env"]).saliency_amp)
+
+    def test_cli_precrop_choices_and_removed_backend_selection(self):
+        for choice in ("middle", "left", "right"):
+            with self.subTest(precrop=choice):
+                args = cli.parse_args(["in.mp4", "out.mp4", "--precrop", choice])
+                self.assertEqual(args.precrop, choice)
+        for extra in (["--precrop", "full"], ["--saliency-model", "handcrafted"]):
+            with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as result:
+                cli.parse_args(["in.mp4", "out.mp4", *extra])
+            self.assertEqual(result.exception.code, 2)
+        with self.assertRaisesRegex(ValueError, "precrop"):
+            config.validate_config(config.AppConfig(input="in.mp4", output="out.mp4", precrop="invalid"))
 
     def test_cli_exception_is_terminal_traceback_with_failure_exit(self):
         output = io.StringIO()
@@ -93,6 +108,7 @@ class PipelineLifetimeTests(unittest.TestCase):
         pose_cache = MagicMock()
         pose_cache.helper.actual_device = None
         pose_cache.helper.rois_inferred = pose_cache.helper.rois_matched = pose_cache.cache_hits = 0
+        pose_cache.primary_only_frames = pose_cache.full_scan_frames = pose_cache.rois_skipped = 0
         saliency = MagicMock()
         saliency.process.return_value = SimpleNamespace(map=np.zeros((64, 64), np.float32))
         saliency.telemetry.return_value = {"active_backend": "handcrafted"}
@@ -100,7 +116,7 @@ class PipelineLifetimeTests(unittest.TestCase):
         def observe(frame, tracks, helper, state, context, top_k):
             events.append(("pose", context.frame_index))
             return FrameObservations(context, tracks)
-        def saliency_process(frame, observations):
+        def saliency_process(frame, observations, **kwargs):
             events.append(("saliency", observations.frame.frame_index))
             return saliency.process.return_value
         saliency.process.side_effect = saliency_process

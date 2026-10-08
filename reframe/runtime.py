@@ -53,6 +53,8 @@ def log_runtime_info(args) -> None:
                  args.seg_model, args.device, args.yolo_device)
     logging.info("YOLO pose model=%s selected_device=%s; encoder requested=%s",
                  args.pose_model, args.yolo_device, args.video_encoder)
+    logging.info("Saliency policy=auto_cascade (pose_only/handcrafted/deepgazemr); "
+                 "precrop=%s; post_restore=%s", args.precrop or "full", args.post_restore)
     if torch is not None:
         logging.info("PyTorch=%s CUDA build=%s CUDA available=%s",
                      torch.__version__, torch.version.cuda, torch.cuda.is_available())

@@ -263,6 +263,122 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(second.inferred_at, first.inferred_at)
 
 
+class PrimaryPoseTests(unittest.TestCase):
+    def setUp(self):
+        self.helper = MagicMock(keypoint_conf=.35)
+        self.helper.detect_many.side_effect = self.detect
+        self.cache = app.PoseCueCache(self.helper, .2, 60)
+        self.frame = np.zeros((300, 500, 3), np.uint8)
+        self.primary = contracts.TrackObservation(0, 0, .9, (100, 20, 200, 220), 91)
+        self.other = contracts.TrackObservation(1, 0, .8, (320, 40, 380, 160), 92)
+        self.state = contracts.CameraState(200, 120, 1, 200, 120, 1,
+                                          tracked_id=91, tracked_cls_id=0,
+                                          lock_track_id=91, lock_cls_id=0,
+                                          is_scene_cut=False,
+                                          frames_since_subject_switch=10)
+
+    def detect(self, frame, requests, people):
+        detections = {}
+        for index, box, _ in requests:
+            points = skeleton()
+            points[:, 0] = box[0] + (points[:, 0] - 100) * (box[2] - box[0]) / 100
+            points[:, 1] = box[1] + (points[:, 1] - 20) * (box[3] - box[1]) / 200
+            detections[index] = PoseDetection(points, app.pose_cues(points, box, frame.shape, .35))
+        return detections
+
+    def observe(self, index, tracks=None, top_k=0, scene=1):
+        tracks = tuple(tracks if tracks is not None else (self.primary, self.other))
+        context = FrameContext(index, (index - 1) / 60, 500, 300, scene)
+        return app.observe_poses(self.frame, tracks, self.cache, self.state, context, top_k)
+
+    def test_stable_locked_subject_refreshes_without_background_rois(self):
+        first = self.observe(1)
+        cached = self.observe(2)
+        refreshed = self.observe(13)
+        self.assertEqual(set(first.poses), {0, 1})
+        self.assertEqual(set(cached.poses), {0})
+        self.assertEqual(cached.poses[0].inferred_at.frame_index, 1)
+        self.assertEqual(refreshed.poses[0].inferred_at.frame_index, 13)
+        requests = [call.args[1] for call in self.helper.detect_many.call_args_list]
+        self.assertEqual([[item[2] for item in batch] for batch in requests], [[91, 92], [91]])
+        self.assertEqual(self.cache.primary_only_frames, 2)
+        self.assertEqual(self.cache.full_scan_frames, 1)
+        self.assertEqual(self.cache.rois_skipped, 2)
+
+    def test_failed_primary_refresh_immediately_restores_competitors(self):
+        self.observe(1)
+        self.helper.detect_many.side_effect = lambda frame, requests, people: {
+            index: None if track_id == 91 else self.detect(frame, [(index, box, track_id)], people)[index]
+            for index, box, track_id in requests}
+        observed = self.observe(13)
+        self.assertEqual(set(observed.poses), {0, 1})
+        self.assertIsNone(observed.poses[0].keypoints)
+        self.assertIsNotNone(observed.poses[1].keypoints)
+        requests = [call.args[1] for call in self.helper.detect_many.call_args_list]
+        self.assertEqual([[item[2] for item in batch] for batch in requests], [[91, 92], [91], [92]])
+        self.assertEqual(self.cache.primary_only_frames, 0)
+
+    def test_locked_identity_wins_over_previous_subject_and_top_k(self):
+        self.observe(1)
+        self.state.tracked_id = 92
+        observed = self.observe(2, top_k=1)
+        self.assertEqual(set(observed.poses), {0})
+        self.assertEqual(self.cache.primary_only_frames, 1)
+        self.assertEqual(self.cache.rois_skipped, 0)
+
+    def test_unlocked_primary_requires_hold_and_clear_dominance(self):
+        self.state.lock_track_id = self.state.lock_cls_id = None
+        self.observe(1)
+        self.state.frames_since_subject_switch = 1
+        self.assertEqual(set(self.observe(2).poses), {0, 1})
+        self.state.frames_since_subject_switch = 10
+        self.assertEqual(set(self.observe(3).poses), {0})
+        competitor = contracts.TrackObservation(1, 0, .95, (300, 20, 400, 220), 92)
+        self.assertEqual(set(self.observe(4, (self.primary, competitor)).poses), {0, 1})
+
+    def test_new_person_cut_lost_or_pair_state_restores_full_scan(self):
+        self.observe(1, (self.primary,))
+        self.assertEqual(set(self.observe(2).poses), {0, 1})
+        for attribute in ("is_scene_cut", "missed_frames", "two_person_active_frames"):
+            with self.subTest(attribute=attribute):
+                setattr(self.state, attribute, 1)
+                self.assertEqual(set(self.observe(3).poses), {0, 1})
+                setattr(self.state, attribute, 0)
+        self.cache.clear()
+        self.assertEqual(set(self.observe(4).poses), {0, 1})
+
+    def test_movement_overlap_and_missing_primary_restore_full_scan(self):
+        cases = [
+            (contracts.TrackObservation(0, 0, .9, (140, 20, 240, 220), 91), self.other),
+            (self.primary, contracts.TrackObservation(1, 0, .8, (140, 20, 240, 220), 92)),
+            (self.other,),
+        ]
+        for tracks in cases:
+            with self.subTest(tracks=tracks):
+                self.cache.clear()
+                self.observe(1)
+                self.assertEqual(set(self.observe(2, tracks).poses), {track.row_index for track in tracks})
+
+    def test_low_confidence_or_stale_original_pose_never_confirms_itself(self):
+        self.observe(1)
+        for points in (np.full((17, 3), .1), skeleton()):
+            with self.subTest(confident=bool(points[0, 2] > .5)):
+                at, box, observation = self.cache.cache[91]
+                measured_at = observation.inferred_at if points[0, 2] < .5 else FrameContext(-100, -2, 500, 300, 1)
+                # Artificially advance the remap context/cache timestamp; only
+                # the original measurement is permitted to prove freshness.
+                remapped = contracts.PoseObservation(points, points, observation.cues,
+                    FrameContext(2, 1 / 60, 500, 300, 1), measured_at, "remapped", 91)
+                self.cache.cache[91] = (2, box, remapped)
+                self.assertEqual(set(self.observe(3).poses), {0, 1})
+
+    def test_torso_pose_is_sufficient_without_face_keypoints(self):
+        self.observe(1)
+        at, box, observation = self.cache.cache[91]
+        observation.inferred_keypoints[:5, 2] = 0
+        self.assertEqual(set(self.observe(2).poses), {0})
+
+
 class PipelineTests(unittest.TestCase):
     def build(self, rows, helper, top_k=0):
         boxes = MagicMock()

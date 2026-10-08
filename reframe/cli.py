@@ -27,6 +27,9 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
                         help="Enable PyTorch C++ tracebacks and Python fault diagnostics; keep stderr visible")
     parser.add_argument("--max-frames", type=int,
                         help="Process only the first N frames for a short diagnostic render")
+    parser.add_argument("--precrop", choices=["middle", "left", "right"],
+                        help="Infer on the middle, left, or right half-width at full height; "
+                             "omit to infer on the full frame. Output still crops the full source.")
     parser.add_argument("--device",
                         help="YOLO inference device: auto, cpu, mps, cuda, cuda:N, or GPU index N")
 
@@ -74,11 +77,6 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
                         help="Maximum person ROIs per pose inference batch")
 
     parser.add_argument(
-        "--saliency-model",
-        choices=["auto", "deepgazemr", "handcrafted"],
-        help="Default: deepgazemr; temporal warmup and failures use visible handcrafted output",
-    )
-    parser.add_argument(
         "--saliency-device",
         choices=["auto", "cpu", "cuda", "mps"],
     )
@@ -98,7 +96,7 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument(
         "--post-restore",
         action="store_true",
-        help="Apply unsharp mask and gentle denoising during FFmpeg stage.",
+        help="Opt in to FFmpeg unsharp and denoising filters (disabled by default for speed).",
     )
 
     parser.add_argument("--video-encoder")
@@ -143,7 +141,7 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument(
         "--cue-top-k",
         type=int,
-        help="Limit expensive person cues; 0 means all people",
+        help="Limit person cues during discovery; 0 means all. Stable subjects use priority updates.",
     )
     parser.add_argument(
         "--temp-dir", help="Location for lossless temporary videos"

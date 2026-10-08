@@ -5,11 +5,13 @@ import logging
 import math
 import shutil
 import tempfile
+import time
 from contextlib import ExitStack
 from pathlib import Path
 import cv2
 from reframe.config import AppConfig, CLASS_IDS
-from reframe.contracts import CameraState, FrameContext
+from reframe.contracts import CameraState
+from reframe.precrop import InferenceRegion
 from reframe.geometry import compute_base_crop, current_crop_size, clamp, lerp
 from reframe.perception.segmentation import SegmentationTracker
 from reframe.perception.pose import YOLOPoseHelper, PoseCueCache, observe_poses
@@ -26,6 +28,8 @@ from reframe.debug import draw_debug
 
 
 def process_video(args: AppConfig) -> None:
+    started = time.perf_counter()
+    stage_seconds = dict(segmentation=0.0, pose=0.0, saliency=0.0, render_write=0.0)
     input_path = Path(args.input)
     output_path = Path(args.output)
     if input_path.resolve() == output_path.resolve():
@@ -55,6 +59,10 @@ def process_video(args: AppConfig) -> None:
 
     if not math.isfinite(fps) or fps <= 0 or min(frame_w, frame_h) < 64:
         raise ValueError("Invalid video dimensions or FPS")
+    region = InferenceRegion.from_frame(frame_w, frame_h, args.precrop)
+    fallback_x, fallback_y = region.center
+    logging.info("Inference region=%s bounds=%s source=%sx%s; rendering from original frames",
+                 args.precrop or "full", region.bounds, frame_w, frame_h)
     args.runtime_fps = fps
     args.reference_dt = 30.0 / fps
     args.max_missed_frames = round(
@@ -162,11 +170,11 @@ def process_video(args: AppConfig) -> None:
                     raise RuntimeError("Could not create debug preview writer.")
 
             state = CameraState(
-                crop_center_x=frame_w / 2.0,
-                crop_center_y=frame_h / 2.0,
+                crop_center_x=fallback_x,
+                crop_center_y=fallback_y,
                 zoom=args.min_zoom,
-                target_center_x=frame_w / 2.0,
-                target_center_y=frame_h / 2.0,
+                target_center_x=fallback_x,
+                target_center_y=fallback_y,
                 target_zoom=args.min_zoom,
                 is_scene_cut=True,
             )
@@ -189,6 +197,7 @@ def process_video(args: AppConfig) -> None:
             actual_yolo_device = None
 
             for frame_idx, frame in frames:
+                inference_frame = region.crop(frame)
                 is_cut = (
                     inline_scene.update(frame, frame_idx)
                     if inline_scene
@@ -198,25 +207,38 @@ def process_video(args: AppConfig) -> None:
                     tracker.reset()
                     if pose_helper is not None:
                         pose_helper.clear()
-                tracks = tracker.track(frame)
+                stage_started = time.perf_counter()
+                tracks = tracker.track(inference_frame)
+                stage_seconds["segmentation"] += time.perf_counter() - stage_started
                 actual_yolo_device = tracker.actual_device
 
                 if is_cut:
                     scene_index += 1
                     state.current_scene_index = scene_index
                     reset_for_new_scene(state, frame_w, frame_h, args.min_zoom)
+                    state.crop_center_x = state.target_center_x = fallback_x
+                    state.crop_center_y = state.target_center_y = fallback_y
                     saliency_helper.reset()
                     stats["scene_resets"] += 1
                     last_subject_key = None
 
-                context = FrameContext(frame_idx, (frame_idx - 1) / fps, frame_w, frame_h, scene_index)
-                observations = observe_poses(frame, tracks, pose_helper, state, context, args.cue_top_k)
-                saliency = saliency_helper.process(frame, observations)
+                context = region.context(frame_idx, (frame_idx - 1) / fps, scene_index)
+                stage_started = time.perf_counter()
+                local_observations = observe_poses(inference_frame, tracks, pose_helper, state,
+                                                   context, args.cue_top_k)
+                stage_seconds["pose"] += time.perf_counter() - stage_started
+                stage_started = time.perf_counter()
+                primary_id = state.lock_track_id if state.lock_track_id is not None else state.tracked_id
+                saliency = saliency_helper.process(inference_frame, local_observations,
+                                                   preferred_track_id=primary_id)
+                stage_seconds["saliency"] += time.perf_counter() - stage_started
+                observations = region.to_source(local_observations)
                 saliency_map = saliency.map
                 candidates = build_candidates(
                     observations=observations, saliency_map=saliency_map,
                     ranking_model=ranking_model, class_names=class_names, state=state, fps=fps,
                     speaker_segments=speaker_segments if args.speaker_aware_mode else [],
+                    saliency_bounds=region.bounds,
                 )
 
                 subject = choose_subject(
@@ -373,6 +395,7 @@ def process_video(args: AppConfig) -> None:
                         frame_h=frame_h,
                         min_zoom=args.min_zoom,
                         max_zoom=args.max_zoom,
+                        saliency_bounds=region.bounds,
                     )
 
                     if (
@@ -404,12 +427,12 @@ def process_video(args: AppConfig) -> None:
                         if state.missed_frames > args.max_missed_frames:
                             state.crop_center_x = lerp(
                                 state.crop_center_x,
-                                frame_w / 2.0,
+                                fallback_x,
                                 1 - 0.97**args.reference_dt,
                             )
                             state.crop_center_y = lerp(
                                 state.crop_center_y,
-                                frame_h / 2.0,
+                                fallback_y,
                                 1 - 0.97**args.reference_dt,
                             )
                             state.zoom = lerp(
@@ -440,6 +463,7 @@ def process_video(args: AppConfig) -> None:
                 crop_w, crop_h = current_crop_size(
                     base_crop_w, base_crop_h, state.zoom, frame_w, frame_h
                 )
+                stage_started = time.perf_counter()
                 cropped, crop_rect = crop_frame(
                     frame, state.crop_center_x, state.crop_center_y, crop_w, crop_h
                 )
@@ -464,6 +488,8 @@ def process_video(args: AppConfig) -> None:
                         output_height=args.output_height,
                     )
                     debug_writer.write(dbg)
+
+                stage_seconds["render_write"] += time.perf_counter() - stage_started
 
                 stats["frames_processed"] += 1
                 if args.max_frames is not None and stats["frames_processed"] >= args.max_frames:
@@ -519,6 +545,7 @@ def process_video(args: AppConfig) -> None:
                     )
 
             saliency_telemetry = saliency_helper.telemetry()
+            elapsed = time.perf_counter() - started
             summary = {
                 "preset": args.preset,
                 "frames_processed": stats["frames_processed"],
@@ -531,6 +558,11 @@ def process_video(args: AppConfig) -> None:
                 "output_width": args.output_width,
                 "output_height": args.output_height,
                 "post_restore": args.post_restore,
+                "precrop": args.precrop,
+                "inference_bounds": region.bounds,
+                "elapsed_seconds": elapsed,
+                "processing_fps": stats["frames_processed"] / max(elapsed, 1e-9),
+                "stage_wall_seconds": stage_seconds,
                 "encode_mode": args.encode_mode,
                 "seg_model": args.seg_model,
                 "yolo_device": actual_yolo_device,
@@ -539,6 +571,9 @@ def process_video(args: AppConfig) -> None:
                 "pose_rois_inferred": pose_helper.helper.rois_inferred if pose_helper else 0,
                 "pose_rois_matched": pose_helper.helper.rois_matched if pose_helper else 0,
                 "pose_cache_hits": pose_helper.cache_hits if pose_helper else 0,
+                "pose_primary_only_frames": pose_helper.primary_only_frames if pose_helper else 0,
+                "pose_full_scan_frames": pose_helper.full_scan_frames if pose_helper else 0,
+                "pose_rois_skipped": pose_helper.rois_skipped if pose_helper else 0,
                 "video_encoder_requested": args.video_encoder,
                 "video_encoder_actual": actual_encoder,
                 "scene_method": args.scene_method,

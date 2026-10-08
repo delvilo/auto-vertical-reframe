@@ -56,6 +56,7 @@ class AppConfig:
     diagnose_env: bool = False
     native_debug: bool = False
     max_frames: int | None = None
+    precrop: str | None = None
     device: str = 'auto'
     seg_model: str = 'yolo26n-seg.pt'
     tracker: str = 'bytetrack.yaml'
@@ -85,7 +86,6 @@ class AppConfig:
     pose_conf: float = 0.25
     keypoint_conf: float = 0.35
     pose_batch_size: int = 4
-    saliency_model: str = 'deepgazemr'
     saliency_device: str = 'auto'
     saliency_max_side: int = 384
     saliency_trust_repo: bool = False
@@ -147,6 +147,8 @@ def validate_config(args: AppConfig) -> None:
         raise ValueError("pose-model requires a COCO-17 YOLO .pt checkpoint")
     if args.max_frames is not None and args.max_frames < 1:
         raise ValueError("max-frames must be >= 1")
+    if args.precrop not in {None, "middle", "left", "right"}:
+        raise ValueError("precrop must be middle, left, right, or omitted for the full frame")
 
     if (
         args.saliency_interval < 1

@@ -193,13 +193,85 @@ class PoseCueCache:
         self.fps = fps
         self.cache = {}
         self.cache_hits = 0
+        self.primary_only_frames = 0
+        self.full_scan_frames = 0
+        self.rois_skipped = 0
+        self._previous_people: frozenset[int | None] | None = None
 
     def clear(self):
         self.cache.clear()
+        self._previous_people = None
 
     def close(self):
         self.clear()
         self.helper.close()
+
+    @staticmethod
+    def stable_box(old, box, tolerance=0.2):
+        ow, oh = max(1.0, old[2] - old[0]), max(1.0, old[3] - old[1])
+        sx, sy = (box[2] - box[0]) / ow, (box[3] - box[1]) / oh
+        return (1 - tolerance <= sx <= 1 / (1 - tolerance)
+                and 1 - tolerance <= sy <= 1 / (1 - tolerance)
+                and abs(box[0] - old[0]) < ow * tolerance
+                and abs(box[1] - old[1]) < oh * tolerance)
+
+    def primary_person(self, people: list[TrackObservation], state: CameraState,
+                       context: FrameContext) -> TrackObservation | None:
+        """Limit ROIs only while measured pose and identity remain trustworthy.
+
+        A cache remap never advances ``inferred_at``. At expiry, callers must
+        refresh the primary and check its new pose before skipping competitors.
+        """
+        identities = frozenset(track.track_id for track in people)
+        previous_people, self._previous_people = self._previous_people, identities
+        if (not people or previous_people != identities or None in identities
+                or state.is_scene_cut or state.missed_frames or state.two_person_active_frames):
+            return None
+        locked = state.lock_track_id is not None
+        primary_id = state.lock_track_id if locked else state.tracked_id
+        primary_cls = state.lock_cls_id if locked else state.tracked_cls_id
+        if primary_id is None or primary_cls != CLASS_IDS["person"]:
+            return None
+        primary = next((track for track in people if track.track_id == primary_id), None)
+        if primary is None or primary.confidence < 0.5:
+            return None
+        if any(other is not primary and box_iou(primary.box, other.box) > 0.15
+               for other in people):
+            return None
+        if not locked:
+            if state.frames_since_subject_switch < max(2, round(self.fps * 0.1)):
+                return None
+            def prominence(track):
+                x1, y1, x2, y2 = track.box
+                return track.confidence * max(0, x2 - x1) * max(0, y2 - y1)
+            if any(other is not primary and prominence(other) * 1.5 >= prominence(primary)
+                   for other in people):
+                return None
+        return primary if self.trustworthy_pose(primary, context, fresh=False) else None
+
+    def trustworthy_pose(self, primary: TrackObservation, context: FrameContext,
+                         fresh: bool = True) -> bool:
+        previous = self.cache.get(primary.track_id)
+        if previous is None:
+            return False
+        _, old, observation = previous
+        measured = observation.inferred_at
+        age = context.frame_index - measured.frame_index
+        max_age = self.interval if fresh else max(2, self.interval * 2)
+        if (measured.scene_index != context.scene_index or not 0 <= age < max_age
+                or not 0 <= context.timestamp - measured.timestamp < max_age / self.fps
+                or not self.stable_box(old, primary.box, tolerance=0.1)):
+            return False
+        points = observation.inferred_keypoints
+        if points is None or points.shape != (17, 3) or not (observation.cues or {}).get("has_pose"):
+            return False
+        threshold = max(0.5, self.helper.keypoint_conf)
+        x1, y1, x2, y2 = old
+        pw, ph = x2 - x1, y2 - y1
+        valid = (np.isfinite(points).all(axis=1) & (points[:, 2] >= threshold)
+                 & (points[:, 0] >= x1 - pw * 0.12) & (points[:, 0] <= x2 + pw * 0.12)
+                 & (points[:, 1] >= y1 - ph * 0.12) & (points[:, 1] <= y2 + ph * 0.12))
+        return bool(valid.sum() >= 6 and valid[[5, 6, 11, 12]].sum() >= 3)
 
     @staticmethod
     def remap_cues(result, old, box):
@@ -235,12 +307,10 @@ class PoseCueCache:
                           for other, other_box in person_boxes.items())
             if previous is not None and not crowded:
                 at, old, result = previous
-                ow, oh = max(1.0, old[2] - old[0]), max(1.0, old[3] - old[1])
-                sx, sy = (box[2] - box[0]) / ow, (box[3] - box[1]) / oh
-                stable = (0.8 <= sx <= 1.25 and 0.8 <= sy <= 1.25
-                          and abs(box[0] - old[0]) < ow * 0.2
-                          and abs(box[1] - old[1]) < oh * 0.2)
-                if 0 <= frame_idx - at < self.interval and stable:
+                if (0 <= frame_idx - at < self.interval
+                        and result.inferred_at.scene_index == context.scene_index
+                        and 0 <= context.timestamp - result.inferred_at.timestamp < self.interval / self.fps
+                        and self.stable_box(old, box)):
                     output[index] = self.remap_observation(result, old, box, context)
                     self.cache_hits += 1
                     continue
@@ -278,12 +348,32 @@ def observe_poses(frame: np.ndarray, tracks: tuple[TrackObservation, ...],
                   cue_top_k: int = 0) -> FrameObservations:
     people = [track for track in tracks if track.cls_id == CLASS_IDS["person"]]
     person_boxes = {track.row_index: track.box for track in people}
+    primary = helper.primary_person(people, state, context) if isinstance(helper, PoseCueCache) else None
     if cue_top_k:
         def priority(track):
             x1, y1, x2, y2 = track.box
-            return (track.track_id is not None and track.track_id == state.tracked_id,
+            return (track.track_id is not None and track.track_id == state.lock_track_id,
+                    track.track_id is not None and track.track_id == state.tracked_id,
                     track.confidence * (x2 - x1) * (y2 - y1), track.row_index)
         people = sorted(people, key=priority, reverse=True)[:cue_top_k]
+    if primary is not None:
+        poses = helper.get_many(frame, [(primary.row_index, primary.box, primary.track_id)],
+                                person_boxes, context)
+        if helper.trustworthy_pose(primary, context):
+            helper.primary_only_frames += 1
+            helper.rois_skipped += max(0, len(people) - 1)
+            return FrameObservations(context, tracks, poses)
+        else:
+            # The refreshed primary was weak/missing. Analyze the remaining
+            # allowed people in this same frame so they can compete immediately.
+            helper.full_scan_frames += 1
+            remaining = [(track.row_index, track.box, track.track_id) for track in people
+                         if track.row_index != primary.row_index]
+            if remaining:
+                poses.update(helper.get_many(frame, remaining, person_boxes, context))
+            return FrameObservations(context, tracks, poses)
+    if isinstance(helper, PoseCueCache):
+        helper.full_scan_frames += 1
     requests = [(track.row_index, track.box, track.track_id) for track in people]
     poses = helper.get_many(frame, requests, person_boxes, context) if helper is not None else {}
     return FrameObservations(context, tracks, poses)

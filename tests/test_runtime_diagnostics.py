@@ -62,6 +62,12 @@ class BackendTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             arguments("--max-frames", "0")
 
+    def test_post_restore_is_disabled_unless_explicitly_requested(self):
+        self.assertIsNone(video_io.build_video_filters(arguments().post_restore))
+        enabled = video_io.build_video_filters(arguments("--post-restore").post_restore)
+        self.assertIn("hqdn3d=", enabled)
+        self.assertIn("unsharp=", enabled)
+
 
 
 class ProcessOutputTests(unittest.TestCase):

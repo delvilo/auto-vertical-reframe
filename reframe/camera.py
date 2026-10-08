@@ -203,16 +203,18 @@ def build_pair_observation(
 
 
 def build_global_saliency_observation(
-    saliency_map: np.ndarray,
+    saliency_map: np.ndarray | None,
     base_crop_w: int,
     base_crop_h: int,
     frame_w: int,
     frame_h: int,
     min_zoom: float,
     max_zoom: float,
+    saliency_bounds: tuple[int, int, int, int] | None = None,
 ) -> Optional[CameraObservation]:
     region = extract_saliency_region(
-        saliency_map, (0, 0, frame_w, frame_h), frame_shape=(frame_h, frame_w)
+        saliency_map, (0, 0, frame_w, frame_h), frame_shape=(frame_h, frame_w),
+        map_bounds=saliency_bounds,
     )
     if region is None or region[6] < 0.02:
         return None

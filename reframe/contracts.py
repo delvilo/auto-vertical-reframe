@@ -159,14 +159,15 @@ class BackendPrediction:
 class SaliencyResult:
     """Map pixels span frame.width/height; inferred_at is never advanced by flow.
 
+    A None map explicitly means pose-only composition; no saliency is available.
     backend/status describe the last refresh. EMA can retain older content;
     source and history_weight make that mixture explicit. Arrays are CPU data.
     """
-    map: np.ndarray
+    map: np.ndarray | None
     frame: FrameContext
     inferred_at: FrameContext
     backend: str
-    status: Literal["predicted", "warmup", "fallback"]
-    source: Literal["refresh", "ema", "propagated"]
+    status: Literal["predicted", "warmup", "fallback", "skipped"]
+    source: Literal["refresh", "ema", "propagated", "pose_only", "cached"]
     reason: str | None = None
     history_weight: float = 0.0

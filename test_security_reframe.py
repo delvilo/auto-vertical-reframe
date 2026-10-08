@@ -66,7 +66,6 @@ class TestSecurityReframe(unittest.TestCase):
     def test_build_saliency_helper_passes_trust_repo_arg(self):
         """Verify build_saliency_helper forwards saliency_trust_repo from CLI args."""
         args_false = AppConfig(
-            saliency_model="deepgazemr",
             saliency_device="cpu",
             saliency_max_side=384,
             saliency_trust_repo=False,
@@ -76,10 +75,9 @@ class TestSecurityReframe(unittest.TestCase):
             saliency_ema=0.65,
         )
         sampled = build_saliency_helper(args_false)
-        self.assertFalse(sampled.backend.trust_repo)
+        self.assertFalse(sampled.deep_backend.trust_repo)
 
         args_true = AppConfig(
-            saliency_model="deepgazemr",
             saliency_device="cpu",
             saliency_max_side=384,
             saliency_trust_repo=True,
@@ -89,7 +87,7 @@ class TestSecurityReframe(unittest.TestCase):
             saliency_ema=0.65,
         )
         sampled_true = build_saliency_helper(args_true)
-        self.assertTrue(sampled_true.backend.trust_repo)
+        self.assertTrue(sampled_true.deep_backend.trust_repo)
 
 
 if __name__ == "__main__":

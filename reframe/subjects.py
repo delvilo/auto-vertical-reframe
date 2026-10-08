@@ -179,12 +179,13 @@ def choose_two_person_pair(
 
 def build_candidates(
     observations: FrameObservations,
-    saliency_map: np.ndarray,
+    saliency_map: np.ndarray | None,
     ranking_model: SubjectRankingModel,
     class_names: dict[int, str],
     state: CameraState,
     fps: float,
     speaker_segments: list[dict],
+    saliency_bounds: tuple[int, int, int, int] | None = None,
 ) -> list[Candidate]:
     h, w = observations.frame.height, observations.frame.width
     frame_idx = observations.frame.frame_index
@@ -207,7 +208,8 @@ def build_candidates(
             framing_cx = mask_cx
             framing_cy = mask_cy
             salient_box = extract_saliency_region(
-                saliency_map, (int(x1), int(y1), int(x2), int(y2)), frame_shape=(h, w)
+                saliency_map, (int(x1), int(y1), int(x2), int(y2)), frame_shape=(h, w),
+                map_bounds=saliency_bounds,
             )
             pose_observation = observations.poses.get(i)
             pose_data = pose_observation.cues if pose_observation is not None else None

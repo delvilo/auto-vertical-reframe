@@ -7,7 +7,8 @@ Scene-aware vertical auto-reframe CLI that turns horizontal footage into 9:16 vi
 - Tracks people, pets, and vehicles through scene cuts with YOLO26 segmentation and ByteTrack.
 - Head-, pose-, and saliency-aware framing with a subject ranking model and smoothed camera path.
 - Four tuned presets (`talking_head`, `sports`, `pets`, `cars`) with sensible zoom and motion limits.
-- DeepGaze MR saliency by default, using a rolling window of 16 frames.
+- Automatic three-tier composition: reliable pose, lightweight saliency, then on-demand DeepGaze MR.
+- Optional half-width inference region (`--precrop middle|left|right`) with full-resolution source output.
 
 ## Overview
 
@@ -21,10 +22,9 @@ Naive center-cropping loses the subject the moment they move. Manual reframing i
 - YOLO26 instance segmentation with configurable classes and confidence.
 - YOLO26n-pose COCO-17 keypoints with conservative head estimates and batched person ROIs.
 - Two-person framing mode when a second subject crosses a spatial threshold.
-- `deepgazemr` is the default saliency backend, with the restored phase-1 temporal window.
-- Explicit `handcrafted` saliency remains available for the original baseline.
-- Automatic fallback from `deepgazemr` to `handcrafted` if model loading or inference fails.
-- Saliency telemetry in logs and final summary: requested backend, active backend, model loaded state, fallback frames, and device.
+- Stable subjects compose directly from pose and segmentation; uncertain scenes use lightweight saliency before DeepGaze MR.
+- DeepGaze MR loads only when needed and a full 16-frame CPU window is available; warmup and failures visibly use handcrafted output.
+- Tier decisions, actual neural calls, cache age and backend/device state are reported in the final summary.
 - Subject lock, min/max zoom, max step-per-frame, and per-axis motion damping.
 - Post-processing via ffmpeg: configurable encoder, CRF, audio bitrate, and optional unsharp/denoise pass.
 - Debug preview export for inspecting crop decisions frame-by-frame.
@@ -95,6 +95,8 @@ editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程�
 
 - `yolo26n-seg.pt` 持續負責分割、ByteTrack ID 與原本的非人物類別。
 - `yolo26n-pose.pt` 每次處理一批 BGR 人物 ROI，由同一份 17 點結果產生身體與頭部線索。
+- 追蹤穩定時優先更新已選定主角；首次選角、主角遺失或人物重疊時擴大姿態分析。
+  雙人構圖會保留第二人的姿態需求。更新後仍使用所有分割框檢查歸屬。
 - 使用分割人物框匹配姿態結果。即使設定 `--cue-top-k`，配對仍會考慮所有人物；
   重疊且無法可靠歸屬的姿態不會套用到目標人物。
 - 頭部框由鼻、眼、耳等可信點估算，不是獨立人臉偵測。點位不足時使用人物框／遮罩構圖。
@@ -117,151 +119,148 @@ editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程�
 官方模型首次使用時自動下載；離線執行請預先準備兩個 `.pt` 權重。
 姿態模型只在允許的類別包含 `person` 時載入。
 
-### DeepGaze MR：回復的顯著性後端
+### 方案 C：三級自動構圖與按需 DeepGaze MR
 
-版本 0.2.1 撤回第二階段 MSDB 更新，保留第一階段的模組拆分及統一後端介面，
-預設選擇 `deepgazemr`。安裝依賴恢復為 MR 路徑，不再要求 DeepGaze MSDB、CLIP 或 einops。
-MSDB 的 MIT1003／uniform、螢幕尺寸、觀看距離及 PPD 參數已撤回。
+`--saliency-model` 已移除；舊指令帶有此參數時會報錯，請刪除整組參數和值。
+每幀依追蹤、姿態的原始推論時間、畫面變化及顯著圖快取品質選擇處理層級：
+
+| 層級 | 判斷與處理 |
+| --- | --- |
+| L1 `pose_only` | 主角 ID、人物框及畫面連續穩定，且有新鮮可靠的身體關鍵點，直接以姿態、分割框與遮罩構圖；不執行顯著性模型或舊顯著圖光流 |
+| L2 `handcrafted` | 姿態部分缺失或場景略有變化，先使用低解析度頻譜殘差與運動差分；可靠快取可短期沿用 |
+| L3 `deepgaze` | L2 仍無法解除主體歧義、追蹤遺失或非人物焦點等不確定性時，才要求 DeepGaze MR 推論 |
+
+可靠姿態不要求每幀都看見臉；肩、髖等身體關鍵點足夠時即可支持 L1。
+快取姿態的重映射不會更新其原始推論時間；過期時先重新取得姿態再判斷層級。
+連續穩定後才降低層級，明顯變化會立即重新評估。L1 不會因為 DeepGaze 快取過期而
+強制執行神經模型，也不會把過期顯著圖加入主角評分。
+
+每幀的低解析度 BGR uint8 影像都加入 **16 幀 CPU ring**，包含 L1 與 L2。
+只有 L3 且時序窗口完整時才載入 DeepGaze 模型、上傳必要影格至裝置並執行推論。
+載入後保留模型，後續只上傳新增影格；切鏡會清除舊時序與顯著圖，重新收集 16 幀。
+窗口不足時使用 L2 暖機；模型載入或推論失敗會保留 warning／traceback 並回退。
+首次 L3 的模型下載／載入延遲仍可能明顯，應與暖機後耗時分開比較。
 
 | 設定 | 行為 |
 | --- | --- |
-| `--saliency-model` | 預設 `deepgazemr`；另可選 `auto`、`handcrafted` |
-| `--saliency-trust-repo` | 首次使用時明確允許載入固定的 `mtangemann/deepgazemr` Hub 程式碼 |
-| `--saliency-device` | `auto`；Colab 測試明確指定 `cuda`，並檢查 Summary 的實際裝置 |
-| `--saliency-max-side` | `384`；4K 16:9 來源約縮為 384×216，再送入 MR |
-| `--saliency-interval` | `3`；每個影格仍加入時間視窗，推論才依固定間隔執行 |
-| `--saliency-amp` | 保留第一階段預設開啟；以下 MR 基準測試明確關閉以測 FP32 |
-| MR center bias | 官方預訓練模型隨附的 LEDOV prior |
+| `--saliency-trust-repo` | 允許首次需要 L3 時載入 `mtangemann/deepgazemr` Hub 程式碼 |
+| `--saliency-device` | `auto`；Colab 可指定 `cuda`，實際裝置以 Summary 為準 |
+| `--saliency-max-side` | `384`；限制顯著性縮圖長邊，保留既有縮放方式 |
+| `--saliency-interval` | `3`；需要顯著性時的基本更新間隔，實際呼叫由三級策略及快取決定 |
+| `--saliency-amp` | 保留既有預設開啟；可用 `--no-saliency-amp` 比較 FP32 |
+| `--post-restore` | **預設關閉**，省去 FFmpeg 降噪與銳化；仍保留手動開啟選項 |
 
-MR 保留目前與前 15 幀的 RGB 影像，形成 `[16,3,H,W]` 輸入。選定 CUDA 時，
-裝置 ring 使用 32 個槽位，保存同一組 16 幀的鏡像副本；場景切換會重設視窗。
-官方 MR 將 VGG19 多幀特徵取平均，沒有接收額外的 optical flow。
-本程式的 OpenCV 光流在 CPU 上平移顯著圖快取。前 15 幀使用 handcrafted 暖機；
-模型載入或推論失敗也會保留 warning／traceback 並回退，因此必須檢查實際後端。
+模型未載入、神經推論次數為 0，可能代表姿態與 L2 已足夠，不是執行失敗。
+需要驗證 L3 時，應選擇遮擋、多人交錯或無可靠人物姿態的片段，確認
+`saliency_model_loaded=true`、`saliency_frames_backend>0` 及實際裝置；
+最後一幀可能已回到 L1/L2，因此不要要求最後的 active backend 必須是 DeepGaze。
 
-`saliency_frames_fallback` 沿用舊版計數，包含暖機推論；interval=3 時，前 15 幀
-通常會計入 5 次。不要要求該數字一律為 0。MR 成功測試應顯示
-`saliency_model_loaded=true`、`saliency_frames_backend>0`、最後的
-`saliency_active_backend=deepgazemr`，且裝置為 CUDA。至少測試 16 幀。
+### `--precrop`：限定推論區域
 
-384×216 與 768×432 都可用於 16:9 來源。`--saliency-max-side 768` 會保留更多
-小人物／細小目標細節，但不保證更好的顯著性或裁切：輸入尺度也會改變物體相對於
-VGG 感受野的大小，以及 MR 固定像素平滑的相對範圍。寬、高各加倍後像素數為 4 倍，
-主要卷積運算及中間特徵儲存量約隨之增加；整體時間與峰值顯存須在 T4 上實測。
-此參數只改 MR 輸入，不改 YOLO 推論或輸出影片解析度。預設先保留 384；若比較 768，
-請使用相同片段與其他參數，另存輸出影片與 log，檢查主角保留率、切換與鏡頭抖動。
-官方輸入及模型說明見 [DeepGaze MR](https://github.com/mtangemann/deepgazemr)；
-此次 Python 3.13+ 測試結果及 Colab 待驗證範圍見 [MR_VALIDATION.md](MR_VALIDATION.md)。
+保留完整高度、只取一半寬度，約為原畫面 50% 面積；奇數寬度向下取整至整數像素。
+
+| 選項 | 水平方向範圍 | 3840×2160 來源的推論區域 |
+| --- | --- | --- |
+| 未指定 | 0%–100% | x=0–3840，高度 2160 |
+| `--precrop left` | 0%–50% | x=0–1920，高度 2160 |
+| `--precrop middle` | 25%–75% | x=960–2880，高度 2160 |
+| `--precrop right` | 50%–100% | x=1920–3840，高度 2160 |
+
+分割／追蹤、姿態及顯著性僅分析所選區域；結果換算回原圖座標，輸出仍從原始影格
+裁切，輸出裁切框可以延伸到推論區域外。區域外的主體不會被偵測；主角離開時不會
+自動擴大為全畫面搜尋。沒有主體時以所選區域作為初始／備援構圖範圍。
+
+本次沒有啟用固定像素預算、YOLO 半精度或偵測跳幀。半幅區域仍採既有模型縮放規則，
+不保證總運算量減半；直向區域在固定長邊下甚至可能增加 DeepGaze 輸入像素。
+實際收益需比較相同影片的總耗時、神經推論呼叫數、峰值顯存及構圖品質。
 
 ### Colab T4：診斷與短片驗證
 
-不讀取影片／下載模型的環境診斷：
+先在已切換至新版程式的 checkout 執行 `python3 -u install_colab.py`。
+Python 3.13+、CUDA 相容套件及 FFmpeg NVENC 可先用以下命令檢查：
 
 ```python
-!python3 -u /usr/local/bin/auto_reframe.py --diagnose-env --device 0 --video-encoder hevc_nvenc --post-restore --native-debug --log-level DEBUG --ffmpeg-log-level info
+!python3 -u /usr/local/bin/auto_reframe.py --diagnose-env --device 0 --video-encoder hevc_nvenc --native-debug --log-level DEBUG --ffmpeg-log-level info
 ```
 
-此模式列出 Python、套件與 GPU，執行 CUDA 矩陣乘法、卷積與兩幀 NVENC 測試。
-它不代表模型已實測。以下 cell 明確使用 handcrafted 重現第一階段基準，測試 90 幀，同步保留 terminal 輸出、
-日誌和失敗狀態；請在影片所在目錄執行：
+此模式列出 Python、套件與 GPU，執行 CUDA 矩陣乘法、卷積與兩幀 NVENC 測試，
+不代表 YOLO 或 DeepGaze 已實測。在影片所在目錄執行以下 cell；
+此範例使用中央半幅推論、主角優先姿態與關閉後處理，保留終端輸出、log 和失敗狀態：
 
 ```bash
 %%bash
 set -euo pipefail
-python3 -u /usr/local/bin/auto_reframe.py \
-  'vv110.mp4' 'vv110V_pose_test.mp4' --saliency-model handcrafted \
+python3 -u -m reframe \
+  'vv110.mp4' 'vv110V_cascade_middle_test.mp4' \
   --seg-model yolo26n-seg.pt --pose-model yolo26n-pose.pt --device 0 \
-  --lock-first-subject --dead-zone 0.15 --post-restore \
+  --precrop middle --lock-first-subject --dead-zone 0.15 \
   --video-encoder hevc_nvenc --max-frames 90 \
+  --saliency-device cuda --saliency-trust-repo \
+  --saliency-max-side 384 --saliency-interval 3 --no-saliency-amp \
   --native-debug --log-level DEBUG --ffmpeg-log-level info \
-  2>&1 | tee /content/reframe-yolo-pose-test.log
+  2>&1 | tee /content/reframe-cascade-middle-test.log
 ```
 
 確認兩行 `YOLO segmentation actual inference device=cuda:0` 與
-`YOLO pose actual inference device=cuda:0`，以及最終 Summary 的
-`video_encoder_actual=hevc_nvenc`。如果片段未偵測到人物，pose 不會推論，
-`pose_device` 為 null；這不能視為 pose GPU 測試成功。
-Summary 另外列出 `frames_with_head_cues`、`frames_with_pose`、
-`pose_rois_inferred`、`pose_rois_matched`、`pose_cache_hits`。
-`frames_with_head_cues` 不可直接當作舊版的「人臉偵測率」。
+`YOLO pose actual inference device=cuda:0`，以及 Summary 的
+`video_encoder_actual=hevc_nvenc`。未偵測到人物時 pose 不會推論，
+`pose_device=null` 不能視為 pose GPU 測試成功。
 
-### 草稿 PR #29：Colab 同步與 MR 驗證
+Summary 保留 `frames_with_head_cues`、`frames_with_pose`、`pose_rois_inferred`、
+`pose_rois_matched`、`pose_cache_hits`，並記錄三級策略、快取年齡與實際神經模型呼叫。
+比較 `saliency_tier_pose_only_frames`、`saliency_tier_handcrafted_frames`、
+`saliency_tier_deepgaze_frames` 與 `saliency_actual_forward_calls`，可辨識省下的運算。
+`elapsed_seconds`／`processing_fps` 包含初始化；`stage_wall_seconds` 是各階段的主機
+耗時，並非獨立 CUDA kernel benchmark。主角優先的省略量記錄於 `pose_rois_skipped`。
+頭部線索比例不是人臉偵測率；有姿態線索的幀數也不是姿態模型重新推論次數。
+日誌列出模組 SHA256 指紋，可辨識 editable checkout 實際使用的程式。
 
-此分支保留第一階段重構，已撤回 MSDB，套件版本為 0.2.1。請先確認 checkout 沒有尚未保存的修改；
-以下命令會在有衝突時停止，不會使用強制覆寫：
-
-```bash
-%%bash
-set -euo pipefail
-{
-  cd /content/auto-vertical-reframe
-  git fetch origin refs/heads/codex/modular-saliency-stage1:refs/remotes/origin/codex/modular-saliency-stage1
-  git switch codex/modular-saliency-stage1 || git switch --track origin/codex/modular-saliency-stage1
-  git merge --ff-only origin/codex/modular-saliency-stage1
-  git rev-parse HEAD
-  python3 -u install_colab.py
-} 2>&1 | tee /content/reframe-mr-install.log
-```
-
-在影片目錄執行（stdout、stderr 與失敗狀態都保留）：
-
-```bash
-%%bash
-set -euo pipefail
-cd /content/drive/MyDrive/video/1080p/crop
-python3 -u -m reframe \
-  'vv110.mp4' 'vv110V_mr_test.mp4' \
-  --seg-model yolo26n-seg.pt --pose-model yolo26n-pose.pt --device 0 \
-  --lock-first-subject --dead-zone 0.15 --post-restore \
-  --video-encoder hevc_nvenc --max-frames 90 \
-  --saliency-model deepgazemr --saliency-device cuda --saliency-trust-repo \
-  --saliency-max-side 384 --saliency-interval 3 --no-saliency-amp \
-  --native-debug --log-level DEBUG --ffmpeg-log-level info \
-  2>&1 | tee /content/reframe-mr-test.log
-```
-
-日誌會列出套件路徑、版本、所有 Python 模組 SHA256 與整體指紋，
-可辨識 editable checkout 實際使用的程式。除了 GPU 與編碼器，也請確認畫面構圖、
-音畫同步、scene resets、subject switches 與原版比較。實際 T4／權重測試需在 Colab 執行。
-上一份成功的 90 幀 Colab log 使用 handcrafted，不能當作 MR 已成功運行的證據。
-請檢查上方列出的 MR Summary 欄位，再回傳 `/content/reframe-mr-test.log`。
+舊版 T4 的 90 幀成功結果見 [Colab T4 紀錄](docs/colab-t4-results-2026-10-08.md)；
+該結果使用固定 DeepGaze 排程及後處理，不代表本次三級策略或 precrop 已在 T4 驗證。
+本次仍需用穩定人物、多人交錯、切鏡及非人物片段，比較暖機後耗時、呼叫數、
+頭腳裁切、主角遺失、鏡頭抖動與音畫同步。確認短片後，移除 `--max-frames 90`
+並更換輸出檔名處理完整影片。驗證範圍見 [MR_VALIDATION.md](MR_VALIDATION.md)。
 
 ## Architecture
 
 | Module | Responsibility |
 | --- | --- |
 | `reframe/cli.py`, `config.py` | Native diagnostics before heavy imports; CLI parsing into typed `AppConfig`, defaults and validation |
-| `contracts.py`, `geometry.py` | Frame/track/pose/saliency data contracts, camera state and shared geometry |
+| `contracts.py`, `geometry.py`, `precrop.py` | Data contracts, geometry and inference-region coordinates mapped back to the source |
 | `perception/segmentation.py`, `pose.py` | Segmentation/tracking, compact mask statistics, batched pose inference and cue cache |
 | `saliency/base.py`, `factory.py`, `backends/` | One backend lifecycle: `load`, `observe`, `predict`, `reset`, `close`, `telemetry` |
-| `saliency/service.py`, `scheduler.py`, `cache.py`, `regions.py` | Every-frame ingestion, fixed refresh policy, optical-flow/EMA map alignment, saliency regions |
+| `saliency/cascade.py`, `cache.py`, `regions.py` | Pose-driven tier selection, every-frame CPU observation, bounded static-map reuse, EMA and saliency regions |
 | `subjects.py`, `camera.py` | Candidate enrichment/ranking, subject selection, framing and smoothed camera motion |
 | `scenes.py`, `video_io.py`, `debug.py`, `runtime.py` | Scene cuts, decoding/encoding and live stderr, overlay, devices and diagnostics |
 | `pipeline.py` | Resource ownership and single-pass orchestration |
 
-Each frame runs segmentation, pose observation, saliency, candidate ranking, then
+Each frame runs segmentation, priority pose observation, automatic saliency selection, candidate ranking, then
 camera composition and encoding. Ranking consumes observations and never calls a
 model. `argparse.Namespace` stays out of the processing layers.
 
 `FrameContext` uses one-based frame indices, `(index - 1) / fps` nominal timestamps,
-original width/height and scene index. `PoseObservation` retains all 17 `(x,y,confidence)`
+width/height of the declared coordinate space and scene index. Models use inference-region
+coordinates; `precrop.py` translates observations to full-source coordinates before ranking
+and camera composition. `PoseObservation` retains all 17 `(x,y,confidence)`
 points on CPU, the original inference points/context, remapped current points/context,
 track ID and `inferred`/`remapped` source. Missing poses are recorded too, so cached
 misses do not look like a new inference. Remapping never advances the inference time.
 
 Saliency backends receive resized BGR uint8 images and return finite 2-D float32
-maps in `[0,1]`, spanning the whole input image. The service retains original geometry
-and inference time separately from the frame to which flow aligns the map. `source`
-distinguishes refresh, EMA and propagation; backend/status identify the last refresh
+maps in `[0,1]`, spanning the inference region; pose-only frames have no saliency map.
+The cascade retains original inference time separately from the current frame.
+It reuses neural maps only while image/track geometry remains nearly stationary and
+the 0.35-second cache limit has not expired. `source` distinguishes refresh, EMA,
+cached reuse and pose-only output; backend/status identify the last refresh
 and report handcrafted warmup/fallback truthfully. EMA may include older map content.
 
-The scheduler still refreshes on scene frames 1, 4, 7, ... by default. Every frame
-reaches `observe`, including skipped predictions, preserving DeepGaze MR's temporal
-window. A scene cut clears tracking/pose/map/temporal state. `ExitStack` closes models,
+The cascade evaluates pose freshness, tracking continuity and image change before
+requesting saliency. Every frame reaches the CPU `observe` ring, including skipped
+predictions, preserving DeepGaze MR's temporal window without loading the model. A scene cut clears tracking/pose/map/temporal state. `ExitStack` closes models,
 saliency state, frame decoding and encoder processes on success, error or interruption.
 
-The active saliency backends are DeepGaze MR and handcrafted. The MSDB model update
-was withdrawn. Pose-driven adaptive scheduling remains a separate future step.
+The active saliency backends are DeepGaze MR and handcrafted. The cascade also
+returns an explicit pose-only result. The MSDB model update remains withdrawn.
 
 ### Local regression checks
 
@@ -302,8 +301,7 @@ python auto_reframe.py input.mp4 output_fixed.mp4 \
     --lock-first-subject \
     --fixed-zoom 1.10 \
     --dead-zone 0.08 \
-    --pan-time 0.55 \
-    --post-restore
+    --pan-time 0.55
 
 ```
 

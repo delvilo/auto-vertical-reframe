@@ -12,6 +12,7 @@ class HandcraftedSaliencyHelper(SaliencyBackend):
 
     def __init__(self) -> None:
         self.prev_gray_small: Optional[np.ndarray] = None
+        self._observed_gray_small: Optional[np.ndarray] = None
         self.backend_name = "handcrafted"
         self.active_backend = "handcrafted"
         self.frames_total = 0
@@ -90,6 +91,7 @@ class HandcraftedSaliencyHelper(SaliencyBackend):
 
     def reset_temporal_state(self) -> None:
         self.prev_gray_small = None
+        self._observed_gray_small = None
 
     def get_telemetry(self) -> dict[str, Any]:
         return {
@@ -105,8 +107,14 @@ class HandcraftedSaliencyHelper(SaliencyBackend):
         pass
 
     def observe(self, frame: np.ndarray, context: FrameContext) -> None:
-        # Motion differences retain the original refresh-to-refresh behavior.
-        pass
+        # Keep adjacent-frame motion even across long pose-only stretches.
+        # No spectrum or saliency map is computed while merely observing.
+        h, w = frame.shape[:2]
+        scale = min(1.0, 320.0 / max(h, w))
+        size = (max(32, round(w * scale)), max(32, round(h * scale)))
+        small = frame if size == (w, h) else cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+        self.prev_gray_small = self._observed_gray_small
+        self._observed_gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
     def predict(self, frame: np.ndarray, context: FrameContext) -> BackendPrediction:
         return BackendPrediction(self.compute_map(frame).astype(np.float32, copy=False), "handcrafted")
