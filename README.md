@@ -9,14 +9,6 @@ Scene-aware vertical auto-reframe CLI that turns horizontal footage into 9:16 vi
 - Four tuned presets (`talking_head`, `sports`, `pets`, `cars`) with sensible zoom and motion limits.
 - Full-frame DeepGaze MSDB spatial saliency by default, with configurable MIT1003/uniform centre bias.
 
-## Demo
-
-| Source (16:9) | Auto Vertical Reframe output (9:16) |
-| :---: | :---: |
-| <img src="assets/demo_source.gif" alt="Source clip" width="320"> | <img src="assets/demo_vertical.gif" alt="Auto Vertical Reframe output" width="180"> |
-
-Full-quality files: [assets/demo_source.mp4](assets/demo_source.mp4), [assets/demo_vertical.mp4](assets/demo_vertical.mp4).
-
 ## Overview
 
 Vertical platforms (Reels, Shorts, TikTok) demand 9:16 video, but most source material is shot horizontally. Auto Vertical Reframe reads a video, detects subjects per scene, ranks candidate subjects using model signals, and drives a virtual camera (pan + zoom) through a smoothed path optimizer. It emits a ready-to-publish MP4 via ffmpeg.
