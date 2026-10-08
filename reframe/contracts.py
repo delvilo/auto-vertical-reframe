@@ -95,6 +95,9 @@ class FrameContext:
     width: int
     height: int
     scene_index: int
+    # Crop before composing this frame: the last settled camera view, or fixed zoom.
+    # Saliency cannot use the new crop because its own prediction helps choose it.
+    view_crop_height: int | None = None
 
 
 class PoseCues(TypedDict, total=False):

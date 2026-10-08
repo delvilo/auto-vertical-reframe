@@ -47,12 +47,17 @@ def main():
 import importlib.metadata as metadata
 import importlib.util
 import cv2, numpy, torch, torchvision, ultralytics, scenedetect, lap, reframe
+import clip, deepgaze_pytorch, einops
+if not callable(getattr(clip, 'load', None)) or not hasattr(deepgaze_pytorch, 'DeepGazeMSDB'):
+    raise RuntimeError('Expected official OpenAI CLIP and DeepGaze MSDB; reinstall requirements.txt')
 if importlib.util.find_spec('mediapipe') is not None:
     raise RuntimeError('mediapipe is still importable; inspect the reported Python environment')
-for name in ('ultralytics', 'scenedetect', 'lap', 'numpy', 'opencv-python', 'torch', 'torchvision'):
+for name in ('ultralytics', 'scenedetect', 'lap', 'numpy', 'opencv-python', 'torch', 'torchvision',
+             'deepgaze-pytorch', 'clip', 'einops'):
     print(name, metadata.version(name), flush=True)
 print('Python:', __import__('sys').executable, flush=True)
 print('Reframe:', reframe.__version__, reframe.__file__, flush=True)
+print('DeepGaze MSDB code/weights licence: UNCONFIRMED; see THIRD_PARTY_MODELS.md', flush=True)
 print('CUDA available:', torch.cuda.is_available(), 'CUDA build:', torch.version.cuda, flush=True)
 if torch.cuda.is_available():
     print('GPU:', torch.cuda.get_device_name(0), flush=True)

@@ -10,3 +10,8 @@ opencv-python>=4.11,<5,!=4.13.0.90
 # Keep a compatible installed CUDA build; do not use pip --upgrade on Colab.
 torch>=2.6,<3
 torchvision>=0.21,<1
+# DeepGaze MSDB code/weights licence is unconfirmed; see THIRD_PARTY_MODELS.md.
+# Install official OpenAI CLIP, not an unrelated package named clip on PyPI.
+deepgaze-pytorch @ git+https://github.com/matthias-k/DeepGaze.git@c7db17e2d1d7ea6468ffdee2cfaddf141095dcff
+clip @ git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6
+einops>=0.8,<1
