@@ -123,7 +123,8 @@ def process_video(args: AppConfig) -> None:
         saliency_helper = build_saliency_helper(args)
         model_resources.callback(saliency_helper.close)
         ranking_model = SubjectRankingModel()
-        pose_helper = (PoseCueCache(YOLOPoseHelper(args), args.cue_interval, fps)
+        pose_helper = (PoseCueCache(YOLOPoseHelper(args), args.cue_interval, fps,
+                                   tracking_max_age=args.seg_max_age)
                        if CLASS_IDS["person"] in allowed_class_ids else None)
         if pose_helper is not None:
             model_resources.callback(pose_helper.close)
@@ -207,12 +208,6 @@ def process_video(args: AppConfig) -> None:
                     tracker.reset()
                     if pose_helper is not None:
                         pose_helper.clear()
-                stage_started = time.perf_counter()
-                tracks = tracker.track(inference_frame)
-                stage_seconds["segmentation"] += time.perf_counter() - stage_started
-                actual_yolo_device = tracker.actual_device
-
-                if is_cut:
                     scene_index += 1
                     state.current_scene_index = scene_index
                     reset_for_new_scene(state, frame_w, frame_h, args.min_zoom)
@@ -224,11 +219,17 @@ def process_video(args: AppConfig) -> None:
 
                 context = region.context(frame_idx, (frame_idx - 1) / fps, scene_index)
                 stage_started = time.perf_counter()
+                tracks = tracker.track(inference_frame, context)
+                stage_seconds["segmentation"] += time.perf_counter() - stage_started
+                actual_yolo_device = tracker.actual_device
+                stage_started = time.perf_counter()
                 local_observations = observe_poses(inference_frame, tracks, pose_helper, state,
-                                                   context, args.cue_top_k)
+                                                   context, args.cue_top_k,
+                                                   tracking_max_age=args.seg_max_age)
                 stage_seconds["pose"] += time.perf_counter() - stage_started
                 stage_started = time.perf_counter()
                 primary_id = state.lock_track_id if state.lock_track_id is not None else state.tracked_id
+                tracker.feedback(local_observations, preferred_track_id=primary_id)
                 saliency = saliency_helper.process(inference_frame, local_observations,
                                                    preferred_track_id=primary_id)
                 stage_seconds["saliency"] += time.perf_counter() - stage_started
@@ -239,6 +240,7 @@ def process_video(args: AppConfig) -> None:
                     ranking_model=ranking_model, class_names=class_names, state=state, fps=fps,
                     speaker_segments=speaker_segments if args.speaker_aware_mode else [],
                     saliency_bounds=region.bounds,
+                    tracking_max_age=args.seg_max_age,
                 )
 
                 subject = choose_subject(
@@ -565,6 +567,8 @@ def process_video(args: AppConfig) -> None:
                 "stage_wall_seconds": stage_seconds,
                 "encode_mode": args.encode_mode,
                 "seg_model": args.seg_model,
+                "seg_max_gap": args.seg_max_gap,
+                "seg_max_age": args.seg_max_age,
                 "yolo_device": actual_yolo_device,
                 "pose_model": args.pose_model if pose_helper else None,
                 "pose_device": pose_helper.helper.actual_device if pose_helper else None,
@@ -581,4 +585,5 @@ def process_video(args: AppConfig) -> None:
                 "saliency_active_backend": saliency_telemetry.get("active_backend"),
             }
             summary.update({f"saliency_{k}": v for k, v in saliency_telemetry.items()})
+            summary.update({f"seg_{k}": v for k, v in tracker.telemetry().items()})
             logging.info("Summary: %s", json.dumps(summary, ensure_ascii=False))

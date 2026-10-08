@@ -115,7 +115,7 @@ class PrecropTests(unittest.TestCase):
                 patch.object(pipeline, "SegmentationTracker", return_value=tracker), \
                 patch.object(pipeline, "YOLOPoseHelper"), \
                 patch.object(pipeline, "PoseCueCache", return_value=pose), \
-                patch.object(pipeline, "observe_poses", side_effect=lambda f, t, h, s, c, k: FrameObservations(c, t)), \
+                patch.object(pipeline, "observe_poses", side_effect=lambda f, t, h, s, c, k, **kw: FrameObservations(c, t)), \
                 patch.object(pipeline, "build_saliency_helper", return_value=service), \
                 patch.object(pipeline, "DirectVideoWriter", return_value=writer), \
                 patch.object(pipeline.InlineSceneDetector, "update", return_value=True), \

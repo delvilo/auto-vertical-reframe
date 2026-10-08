@@ -186,6 +186,7 @@ def build_candidates(
     fps: float,
     speaker_segments: list[dict],
     saliency_bounds: tuple[int, int, int, int] | None = None,
+    tracking_max_age: float = 0.1,
 ) -> list[Candidate]:
     h, w = observations.frame.height, observations.frame.width
     frame_idx = observations.frame.frame_index
@@ -193,7 +194,11 @@ def build_candidates(
     frame_area, frame_diag = float(h * w), math.hypot(w, h)
     candidates: list[Candidate] = []
     for track in observations.tracks:
+        if not track.reliable_at(observations.frame, tracking_max_age):
+            continue
         i, cls_id, conf, track_id = track.row_index, track.cls_id, track.confidence, track.track_id
+        prediction_quality = track.prediction_confidence if track.source == "predicted" else 1.0
+        conf *= prediction_quality
         x1, y1, x2, y2 = track.box
         try:
             width = max(1.0, x2 - x1)
@@ -272,7 +277,7 @@ def build_candidates(
             score = ranking_model.predict(
                 cls_name=cls_name,
                 conf=conf,
-                mask_area=mask_area,
+                mask_area=mask_area * prediction_quality,
                 frame_area=frame_area,
                 dist_center=dist_center,
                 frame_diag=frame_diag,

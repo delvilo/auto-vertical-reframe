@@ -60,6 +60,8 @@ class AppConfig:
     device: str = 'auto'
     seg_model: str = 'yolo26n-seg.pt'
     tracker: str = 'bytetrack.yaml'
+    seg_max_gap: int = 3
+    seg_max_age: float = 0.1
     conf: float = 0.3
     preset: str = 'talking_head'
     classes: list[str] | None = None
@@ -149,6 +151,15 @@ def validate_config(args: AppConfig) -> None:
         raise ValueError("max-frames must be >= 1")
     if args.precrop not in {None, "middle", "left", "right"}:
         raise ValueError("precrop must be middle, left, right, or omitted for the full frame")
+    if isinstance(args.seg_max_gap, bool) or not isinstance(args.seg_max_gap, int) or args.seg_max_gap < 1:
+        raise ValueError("seg-max-gap must be an integer >= 1; 1 runs segmentation every frame")
+    if (
+        isinstance(args.seg_max_age, bool)
+        or not isinstance(args.seg_max_age, (int, float))
+        or not math.isfinite(args.seg_max_age)
+        or args.seg_max_age <= 0
+    ):
+        raise ValueError("seg-max-age must be finite and positive (video seconds)")
 
     if (
         args.saliency_interval < 1

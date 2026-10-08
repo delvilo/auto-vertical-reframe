@@ -20,6 +20,7 @@ Naive center-cropping loses the subject the moment they move. Manual reframing i
 
 - Per-scene subject selection via PySceneDetect (`AdaptiveDetector`).
 - YOLO26 instance segmentation with configurable classes and confidence.
+- Adaptive segmentation intervals with sparse optical-flow correction between YOLO calls; output keeps every source frame.
 - YOLO26n-pose COCO-17 keypoints with conservative head estimates and batched person ROIs.
 - Two-person framing mode when a second subject crosses a spatial threshold.
 - Stable subjects compose directly from pose and segmentation; uncertain scenes use lightweight saliency before DeepGaze MR.
@@ -119,6 +120,31 @@ editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程�
 官方模型首次使用時自動下載；離線執行請預先準備兩個 `.pt` 權重。
 姿態模型只在允許的類別包含 `person` 時載入。
 
+### 動態分割間隔與光流校正
+
+預設在可信的真實偵測連續穩定後，將 YOLO 分割間隔由 **1 → 2 → 3 幀**逐步延長。
+中間影格以運動預測與低解析度稀疏 KLT 光流校正人物位置；預測框與重映射的姿態
+不會重新計算「最後一次真實偵測」時間，也不能靠互相引用升高穩定度。
+切鏡、追蹤遺失、光流不可靠、人物交錯或畫面變化等事件會要求提前刷新。
+每次跳過前都會檢查偵測年齡，達到 `--seg-max-age` 時必須重新偵測。
+
+| 參數 | 預設／用途 |
+| --- | --- |
+| `--seg-max-gap` | `3`；兩次 YOLO 分割間隔的來源幀數上限，正整數。`1` 關閉跳幀，提供逐幀比較基準 |
+| `--seg-max-age` | `0.1`；距上次真實分割的影片時間上限（秒），必須是有限正數；與幀數上限一起生效 |
+
+例如 60 fps 下，最大 3 幀約為 0.05 秒；較低 FPS 時，0.1 秒上限可能使實際間隔縮短。
+開場及不穩定片段維持逐幀偵測，間隔上限不是固定每三幀才允許偵測。
+目前策略最多升至 3 幀；較大的 `--seg-max-gap` 值不會再擴大間隔。
+跳幀僅支援已釘選版本的原生 `BYTETracker`；其他 tracker 會回到逐幀偵測並記錄原因。
+ByteTrack 的預測時鐘會逐個來源影格前進，跳過 YOLO 不等於偵測到空畫面。
+
+**輸出仍保留所有處理範圍內的原始影格、FPS 與音訊時序。** 切鏡檢查、姿態快取時效判斷、
+Saliency 三級策略、DeepGaze 的 16 幀 CPU ring、相機平滑及編碼仍逐幀執行。
+`--precrop` 的推論範圍與原圖輸出定義不變；`--post-restore` 仍預設關閉。
+光流也有成本，追蹤變差還可能增加 Pose／DeepGaze 呼叫，因此要比較整體耗時與構圖品質，
+不能將省下的 YOLO 呼叫比例當成整體加速倍率。
+
 ### 方案 C：三級自動構圖與按需 DeepGaze MR
 
 `--saliency-model` 已移除；舊指令帶有此參數時會報錯，請刪除整組參數和值。
@@ -170,7 +196,8 @@ editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程�
 裁切，輸出裁切框可以延伸到推論區域外。區域外的主體不會被偵測；主角離開時不會
 自動擴大為全畫面搜尋。沒有主體時以所選區域作為初始／備援構圖範圍。
 
-本次沒有啟用固定像素預算、YOLO 半精度或偵測跳幀。半幅區域仍採既有模型縮放規則，
+本次沒有啟用固定像素預算或 YOLO 半精度。分割偵測現在使用上述動態間隔；
+半幅區域仍採既有模型縮放規則，
 不保證總運算量減半；直向區域在固定長邊下甚至可能增加 DeepGaze 輸入像素。
 實際收益需比較相同影片的總耗時、神經推論呼叫數、峰值顯存及構圖品質。
 
@@ -221,20 +248,54 @@ Summary 保留 `frames_with_head_cues`、`frames_with_pose`、`pose_rois_inferre
 頭腳裁切、主角遺失、鏡頭抖動與音畫同步。確認短片後，移除 `--max-frames 90`
 並更換輸出檔名處理完整影片。驗證範圍見 [MR_VALIDATION.md](MR_VALIDATION.md)。
 
+### Colab T4：動態分割與逐幀基準比較
+
+在同一個 Colab session、同一目錄與同一段影片執行以下 cell。
+兩種設定只改 `--seg-max-gap`；其餘模型、精度、precrop 與編碼參數相同。
+第一輪填入權重快取，第二輪比較至少 600 幀（若來源較短則處理至片尾）；不要清除
+YOLO 權重或 Torch Hub 快取。這是**已快取權重的獨立程序比較**，每個程序仍包含模型
+初始化；首次觸發 L3 的下載／載入耗時需另外辨識，並同時看分階段耗時。
+
+```bash
+%%bash
+set -euo pipefail
+for run in 1 2; do
+  for gap in 1 3; do
+    python3 -u -m reframe \
+      'vv110.mp4' "vv110V_seg_gap${gap}_run${run}.mp4" \
+      --seg-model yolo26n-seg.pt --pose-model yolo26n-pose.pt --device 0 \
+      --precrop middle --lock-first-subject --dead-zone 0.15 \
+      --seg-max-gap "$gap" --seg-max-age 0.1 \
+      --video-encoder hevc_nvenc --max-frames 600 \
+      --saliency-device cuda --saliency-trust-repo \
+      --saliency-max-side 384 --saliency-interval 3 --no-saliency-amp \
+      --native-debug --log-level DEBUG --ffmpeg-log-level info \
+      2>&1 | tee "/content/reframe-seg-gap${gap}-run${run}.log"
+  done
+done
+```
+
+比較第二輪的總處理時間與 `stage_wall_seconds.segmentation`（含光流與排程）。
+Summary 的 `seg_detector_calls`、`seg_predicted_frames`、`seg_flow_seconds`、
+`seg_refresh_reasons`、`seg_max_prediction_age_seconds` 記錄真實呼叫數、預測幀數、
+光流耗時、刷新原因與預測資料的最長年齡。同時檢查 Pose／DeepGaze 呼叫有沒有增加、主角 ID 是否切換，
+並確認輸出幀數、FPS、頭腳裁切、鏡頭穩定與音畫同步。這組指令提供可重複的比較方式，
+T4 的實際加速倍率仍需在相同影片上量測。
+
 ## Architecture
 
 | Module | Responsibility |
 | --- | --- |
 | `reframe/cli.py`, `config.py` | Native diagnostics before heavy imports; CLI parsing into typed `AppConfig`, defaults and validation |
 | `contracts.py`, `geometry.py`, `precrop.py` | Data contracts, geometry and inference-region coordinates mapped back to the source |
-| `perception/segmentation.py`, `pose.py` | Segmentation/tracking, compact mask statistics, batched pose inference and cue cache |
+| `perception/segmentation.py`, `motion.py`, `pose.py` | Adaptive segmentation/tracking, sparse optical flow, compact mask statistics, batched pose inference and cue cache |
 | `saliency/base.py`, `factory.py`, `backends/` | One backend lifecycle: `load`, `observe`, `predict`, `reset`, `close`, `telemetry` |
 | `saliency/cascade.py`, `cache.py`, `regions.py` | Pose-driven tier selection, every-frame CPU observation, bounded static-map reuse, EMA and saliency regions |
 | `subjects.py`, `camera.py` | Candidate enrichment/ranking, subject selection, framing and smoothed camera motion |
 | `scenes.py`, `video_io.py`, `debug.py`, `runtime.py` | Scene cuts, decoding/encoding and live stderr, overlay, devices and diagnostics |
 | `pipeline.py` | Resource ownership and single-pass orchestration |
 
-Each frame runs segmentation, priority pose observation, automatic saliency selection, candidate ranking, then
+Each frame runs measured or predicted segmentation, priority pose observation, automatic saliency selection, candidate ranking, then
 camera composition and encoding. Ranking consumes observations and never calls a
 model. `argparse.Namespace` stays out of the processing layers.
 

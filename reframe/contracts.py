@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import math
 from typing import Literal, Optional, TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
@@ -137,6 +138,24 @@ class TrackObservation:
     box: Box
     track_id: int | None
     mask_statistics: tuple[float, float, float, float] | None = None
+    measured_at: FrameContext | None = None
+    source: Literal["detected", "predicted"] = "detected"
+    prediction_confidence: float = 1.0
+
+    def reliable_at(self, context: FrameContext, max_age: float = .1) -> bool:
+        """Flow and pose remapping never renew the last detector measurement."""
+        if self.source == "detected" and self.measured_at is None:
+            return True  # Legacy callers supply current detections without metadata.
+        measured = self.measured_at
+        if self.source not in {"detected", "predicted"} or measured is None:
+            return False
+        age = context.timestamp - measured.timestamp
+        return (math.isfinite(age) and 0 <= age <= max_age + 1e-9
+                and 0 <= context.frame_index - measured.frame_index
+                and (context.scene_index, context.width, context.height)
+                == (measured.scene_index, measured.width, measured.height)
+                and math.isfinite(self.prediction_confidence)
+                and .7 <= self.prediction_confidence <= 1)
 
 
 @dataclass(frozen=True)

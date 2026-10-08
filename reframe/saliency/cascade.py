@@ -34,6 +34,7 @@ class CascadeSaliencyService:
                  max_side: int = 384, ema: float = 0.65, *,
                  lock_first_subject: bool = False, two_person_framing: bool = False,
                  keypoint_conf: float = 0.35, pose_max_age: float = 0.2,
+                 tracking_max_age: float = 0.1,
                  cheap_backend: SaliencyBackend | None = None):
         self.deep_backend = deep_backend
         self.cheap_backend = cheap_backend or HandcraftedSaliencyHelper()
@@ -43,6 +44,7 @@ class CascadeSaliencyService:
         self.two_person_framing = two_person_framing
         self.keypoint_conf = keypoint_conf
         self.pose_max_age = max(0.0, pose_max_age)
+        self.tracking_max_age = tracking_max_age
         self.cache = SaliencyCache(ema)
         self.cache_max_age = 0.35
         self.tier_counts: Counter[str] = Counter()
@@ -109,7 +111,8 @@ class CascadeSaliencyService:
     def _reliable_pose(self, track: TrackObservation, observations: FrameObservations) -> bool:
         pose = observations.poses.get(track.row_index)
         context = observations.frame
-        if (pose is None or pose.keypoints is None or not pose.cues
+        if (not track.reliable_at(context, self.tracking_max_age)
+                or pose is None or pose.keypoints is None or not pose.cues
                 or not pose.cues.get("has_pose") or track.confidence < 0.45
                 or track.track_id is None or pose.track_id != track.track_id
                 or pose.frame != context
@@ -243,6 +246,15 @@ class CascadeSaliencyService:
         h, w = frame.shape[:2]
         if (w, h) != (context.width, context.height):
             raise ValueError("Frame context does not match image dimensions")
+        # Accept reliable flow predictions during skipped detector frames, but
+        # never let a new pose validate stale segmentation or another scene.
+        tracks = tuple(t for t in observations.tracks
+                       if t.reliable_at(context, self.tracking_max_age))
+        if len(tracks) != len(observations.tracks):
+            eligible_rows = {t.row_index for t in tracks}
+            observations = replace(observations, tracks=tracks,
+                                   poses={i: p for i, p in observations.poses.items()
+                                          if i in eligible_rows})
         if self._previous is not None:
             old = self._previous.frame
             if (context.scene_index != old.scene_index or (w, h) != (old.width, old.height)

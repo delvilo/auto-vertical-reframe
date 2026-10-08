@@ -35,6 +35,12 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
 
     parser.add_argument("--seg-model")
     parser.add_argument("--tracker")
+    parser.add_argument("--seg-max-gap", type=int,
+                        help="Maximum adaptive YOLO segmentation interval in source frames (default: 3); "
+                             "1 runs segmentation every frame")
+    parser.add_argument("--seg-max-age", type=float,
+                        help="Maximum time between real segmentation measurements in video seconds "
+                             "(default: 0.1); must be finite and positive")
     parser.add_argument("--conf", type=float)
 
     parser.add_argument(

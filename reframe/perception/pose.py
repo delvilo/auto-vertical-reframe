@@ -187,10 +187,11 @@ class YOLOPoseHelper:
 class PoseCueCache:
     """Batch expired tracks and remap cached head/body cues; never retain tensors."""
 
-    def __init__(self, helper, interval, fps):
+    def __init__(self, helper, interval, fps, tracking_max_age=0.1):
         self.helper = helper
         self.interval = max(1, round(interval * fps))
         self.fps = fps
+        self.tracking_max_age = tracking_max_age
         self.cache = {}
         self.cache_hits = 0
         self.primary_only_frames = 0
@@ -233,7 +234,8 @@ class PoseCueCache:
         if primary_id is None or primary_cls != CLASS_IDS["person"]:
             return None
         primary = next((track for track in people if track.track_id == primary_id), None)
-        if primary is None or primary.confidence < 0.5:
+        if (primary is None or primary.confidence < 0.5
+                or not all(track.reliable_at(context, self.tracking_max_age) for track in people)):
             return None
         if any(other is not primary and box_iou(primary.box, other.box) > 0.15
                for other in people):
@@ -251,6 +253,10 @@ class PoseCueCache:
 
     def trustworthy_pose(self, primary: TrackObservation, context: FrameContext,
                          fresh: bool = True) -> bool:
+        # Pose and segmentation are independent measurements: a fresh skeleton
+        # cannot rejuvenate an expired predicted track, nor can flow refresh pose.
+        if not primary.reliable_at(context, self.tracking_max_age):
+            return False
         previous = self.cache.get(primary.track_id)
         if previous is None:
             return False
@@ -258,7 +264,10 @@ class PoseCueCache:
         measured = observation.inferred_at
         age = context.frame_index - measured.frame_index
         max_age = self.interval if fresh else max(2, self.interval * 2)
-        if (measured.scene_index != context.scene_index or not 0 <= age < max_age
+        if (observation.track_id != primary.track_id
+                or measured.scene_index != context.scene_index
+                or (measured.width, measured.height) != (context.width, context.height)
+                or not 0 <= age < max_age
                 or not 0 <= context.timestamp - measured.timestamp < max_age / self.fps
                 or not self.stable_box(old, primary.box, tolerance=0.1)):
             return False
@@ -309,6 +318,8 @@ class PoseCueCache:
                 at, old, result = previous
                 if (0 <= frame_idx - at < self.interval
                         and result.inferred_at.scene_index == context.scene_index
+                        and (result.inferred_at.width, result.inferred_at.height)
+                        == (context.width, context.height)
                         and 0 <= context.timestamp - result.inferred_at.timestamp < self.interval / self.fps
                         and self.stable_box(old, box)):
                     output[index] = self.remap_observation(result, old, box, context)
@@ -345,7 +356,10 @@ class PoseCueCache:
 
 def observe_poses(frame: np.ndarray, tracks: tuple[TrackObservation, ...],
                   helper: PoseCueCache | None, state: CameraState, context: FrameContext,
-                  cue_top_k: int = 0) -> FrameObservations:
+                  cue_top_k: int = 0, tracking_max_age: float | None = None) -> FrameObservations:
+    if tracking_max_age is None:
+        tracking_max_age = helper.tracking_max_age if isinstance(helper, PoseCueCache) else 0.1
+    tracks = tuple(track for track in tracks if track.reliable_at(context, tracking_max_age))
     people = [track for track in tracks if track.cls_id == CLASS_IDS["person"]]
     person_boxes = {track.row_index: track.box for track in people}
     primary = helper.primary_person(people, state, context) if isinstance(helper, PoseCueCache) else None

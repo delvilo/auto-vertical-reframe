@@ -113,7 +113,7 @@ class PipelineLifetimeTests(unittest.TestCase):
         saliency.process.return_value = SimpleNamespace(map=np.zeros((64, 64), np.float32))
         saliency.telemetry.return_value = {"active_backend": "handcrafted"}
         events = []
-        def observe(frame, tracks, helper, state, context, top_k):
+        def observe(frame, tracks, helper, state, context, top_k, **kwargs):
             events.append(("pose", context.frame_index))
             return FrameObservations(context, tracks)
         def saliency_process(frame, observations, **kwargs):

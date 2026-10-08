@@ -27,7 +27,8 @@ zero neural calls. Existing trust configuration and weight-loading safeguards
 remain in effect.
 
 This change preserves the existing input scaling and saliency AMP defaults;
-it does not add a fixed pixel budget, YOLO FP16, detection skipping or TensorRT.
+it does not add a fixed pixel budget, YOLO FP16 or TensorRT. Adaptive detector
+skipping with sparse optical flow is now enabled as described below.
 Precropping can change aspect ratio and increase the resized DeepGaze pixel count.
 No T4 speedup or visual-quality equivalence is claimed without new measurement.
 
@@ -38,6 +39,67 @@ resource cleanup, removed CLI options and default-disabled restoration. Colab
 runs should report actual model calls and tier reasons alongside overall/stage
 timing; compare stable people, overlap/occlusion, cuts and non-person footage.
 Keep cold model loading separate from warmed processing time.
+
+## Adaptive segmentation verification (2026-10-08)
+
+Default `--seg-max-gap 3 --seg-max-age 0.1` starts with every-frame segmentation.
+Matching real detections must remain stable for 0.1 video seconds to reach gap 2,
+and 0.25 seconds to reach gap 3. Predictions cannot advance those measurement
+timestamps. Each skipped frame uses a <=320-pixel thumbnail, forward/backward
+sparse KLT and robust translation. Low feature counts, inconsistent flow, strong
+image changes, overlap, crop boundaries, uncertain tracking and weak fresh primary
+pose request a real detection. The current policy never exceeds gap 3, even if
+the configured upper bound is larger. `--seg-max-gap 1` is the baseline.
+
+The pinned native ByteTrack advances its Kalman prediction and frame counter once
+per source frame, without calling an empty detection update on skipped frames.
+Flow corrects the center without shrinking detector covariance or renewing its
+measurement time. Lost/unconfirmed tracks and unsupported tracker classes use
+every-frame detection. Masks retain short-lived translated moments; no new full
+segmentation mask is fabricated. Pose, cascade and ranking reject stale or
+unreliable predictions; precrop translates measurement geometry back to source
+coordinates while preserving the original timestamp.
+
+Python 3.13.5 regression verification passed **143 tests and 72 subtests** using
+the CPU dependency versions listed below. New checks include actual OpenCV flow
+and real ByteTrack association/Kalman state with synthetic detections, slow
+translation, unchanged IDs and frame clocks, measurement age, scene/geometry
+resets, lost tracks, unsupported trackers, invalid flow, and downstream provenance.
+
+A separate end-to-end CPU comparison used official YOLO26n segmentation/Pose and
+DeepGaze MR weights. The fixture is a stationary Ultralytics bus photograph,
+resized to 240x320 and padded to a 640x360 video: 90 frames at 60 fps, with AAC
+audio. Both runs used `--precrop middle --conf 0.45`, 180x320 libx264 output,
+default saliency resolution/AMP and no post-restore. The 0.45 confidence threshold
+excludes a weak partial person in this fixture; it is not a new application
+default. Weights were already cached; separate process/model startup is included.
+
+| Measurement | Every frame (gap 1) | Adaptive (gap 3) |
+| --- | ---: | ---: |
+| YOLO segmentation calls | 90 | 36 |
+| Flow-predicted frames | 0 | 54 |
+| Segmentation stage, including scheduling/flow | 8.498 s | 4.523 s |
+| Sparse flow time (included above) | 0 | 0.296 s |
+| Total pipeline time | 47.953 s | 41.793 s |
+| Pose ROI inference calls | 10 | 10 |
+| DeepGaze forward calls | 4 | 4 |
+| Subject switches | 0 | 0 |
+| Maximum prediction age | 0 | 0.0333 s |
+
+Both outputs decode successfully to **90 frames, 60 fps, 1.500 seconds**.
+Their decoded pixels are identical on this stationary fixture. Both retain AAC
+with the same 0.000-second start and 1.493-second encoded duration (source audio
+is 1.500 seconds; existing encoding/trimming is unchanged). DeepGaze ingested all
+90 source frames in each run. CPU loading used the existing safe local fallback
+after the upstream CUDA checkpoint warning, with four successful neural forwards.
+
+The observed 60% reduction is in YOLO calls, not overall runtime. This single
+short stationary fixture validates integration; it does not establish moving-video
+quality or a T4 speedup. GPU validation should compare warmed 600-frame runs on
+stable people, entrances, overlap/occlusion, cuts and non-person footage. README
+provides commands and telemetry keys. Raw local artifacts are under
+`/workspace/reframe-runtime/validation/adaptive-{gap1,gap3}.{log,mp4}` and
+`adaptive-comparison.json`; they are not committed model/video assets.
 
 ## Cascade verification in this workspace
 
