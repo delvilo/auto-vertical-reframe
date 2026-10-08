@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auto-vertical-reframe"
-version = "0.3.0"
+version = "0.2.1"
 description = "Scene-aware vertical video reframing with YOLO pose and saliency"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dynamic = ["dependencies"]
 
 [project.scripts]

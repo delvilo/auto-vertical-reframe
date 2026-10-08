@@ -63,13 +63,10 @@ assert seen
         self.assertEqual(args.pose_model, "yolo26n-pose.pt")
         self.assertEqual(args.seg_model, "yolo26n-seg.pt")
         self.assertEqual(args.saliency_interval, 3)
-        self.assertEqual(args.saliency_model, "deepgazemsdb")
-        self.assertEqual(args.saliency_center_bias, "mit1003")
-        self.assertEqual(args.saliency_screen_inches, 24.0)
-        self.assertEqual(args.saliency_viewing_distance_cm, 60.0)
+        self.assertEqual(args.saliency_model, "deepgazemr")
         self.assertFalse(args.saliency_amp)
         self.assertEqual(args.dead_zone, .15)
-        self.assertFalse(cli.parse_args(["--diagnose-env"]).saliency_amp)
+        self.assertTrue(cli.parse_args(["--diagnose-env"]).saliency_amp)
 
     def test_cli_exception_is_terminal_traceback_with_failure_exit(self):
         output = io.StringIO()

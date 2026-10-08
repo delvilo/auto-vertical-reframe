@@ -8,10 +8,7 @@ if TYPE_CHECKING:
 
 
 class SaliencyBackend(ABC):
-    """observe receives every BGR uint8 frame, including skipped predictions.
-
-    The factory selects original or reduced input geometry. MSDB uses original
-    frames; handcrafted can use reduced frames.
+    """observe receives every resized BGR uint8 frame, including skipped predictions.
 
     FrameContext always describes the original image; predictions span the input
     image and the service maps them to original coordinates. reset drops temporal

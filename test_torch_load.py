@@ -2,7 +2,7 @@ import ast
 from pathlib import Path
 
 def test_torch_load_weights_only():
-    auto_reframe_path = Path(__file__).parent / "reframe/saliency/msdb_assets.py"
+    auto_reframe_path = Path(__file__).parent / "reframe/saliency/backends/deepgazemr.py"
     with open(auto_reframe_path, "r", encoding="utf-8") as f:
         tree = ast.parse(f.read(), filename=str(auto_reframe_path))
 
@@ -10,10 +10,11 @@ def test_torch_load_weights_only():
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
-            if isinstance(func, ast.Attribute) and func.attr == "load_state_dict_from_url":
-                torch_load_calls.append(node)
+            if isinstance(func, ast.Attribute) and func.attr == "load":
+                if isinstance(func.value, ast.Name) and func.value.id == "torch":
+                    torch_load_calls.append(node)
 
-    assert torch_load_calls, "No explicit checkpoint loading found"
+    assert len(torch_load_calls) == 2, f"Expected 2 torch.load calls, found {len(torch_load_calls)}"
 
     for call in torch_load_calls:
         weights_only_kw = [kw for kw in call.keywords if kw.arg == "weights_only"]

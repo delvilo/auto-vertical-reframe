@@ -75,23 +75,19 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
 
     parser.add_argument(
         "--saliency-model",
-        choices=["auto", "deepgazemsdb", "handcrafted"],
-        help="Default: deepgazemsdb; auto permits visible handcrafted fallback on failure",
+        choices=["auto", "deepgazemr", "handcrafted"],
+        help="Default: deepgazemr; temporal warmup and failures use visible handcrafted output",
     )
     parser.add_argument(
         "--saliency-device",
         choices=["auto", "cpu", "cuda", "mps"],
     )
-    parser.add_argument("--saliency-max-side", type=int,
-                        help="Handcrafted service resolution only; MSDB always receives original frames")
-    parser.add_argument("--saliency-center-bias", choices=["mit1003", "uniform"],
-                        help="MSDB position prior (default: mit1003); independent of dataset=None")
-    parser.add_argument("--saliency-screen-inches", type=float,
-                        help="Diagonal of a 9:16 portrait display, in inches (default: 24)")
-    parser.add_argument("--saliency-viewing-distance-cm", type=float,
-                        help="Viewing distance in centimetres (default: 60)")
-    parser.add_argument("--saliency-pixel-per-dva", type=float,
-                        help="Override pixels per visual degree in ORIGINAL INPUT pixels; otherwise derive from display and crop")
+    parser.add_argument("--saliency-max-side", type=int)
+    parser.add_argument(
+        "--saliency-trust-repo",
+        action="store_true",
+        help="Allow torch.hub to execute untrusted code from remote or local repo.",
+    )
 
     parser.add_argument("--speaker-aware-mode", action="store_true")
     parser.add_argument("--speaker-json")
@@ -163,7 +159,7 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument(
         "--saliency-amp",
         action=argparse.BooleanOptionalAction,
-        help="Opt in to CUDA FP16 autocast; default is FP32",
+        help="CUDA FP16 autocast; automatically disabled if inference fails",
     )
     parser.add_argument(
         "--scene-method", choices=["inline", "prepass"]

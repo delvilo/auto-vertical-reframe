@@ -42,7 +42,7 @@ python auto_reframe.py skate.mp4 output_sports.mp4 \\
 ------------------------------------------------------------------------
 python auto_reframe.py footage.mp4 output_vertical.mp4 \\
     --preset talking_head \\
-    --saliency-model deepgazemsdb \\
+    --saliency-model deepgazemr \\
     --saliency-device auto \\
     --post-restore \\
     --save-debug-preview \\
