@@ -194,6 +194,9 @@ def run_ffmpeg_mux(
                 "aac",
                 "-b:a",
                 audio_bitrate,
+                # Pad short source audio so -shortest ends at rendered video EOF.
+                "-af",
+                "apad",
                 "-shortest",
             ]
             if final_path.suffix.lower() in {".mp4", ".mov", ".m4v"}:
@@ -439,7 +442,9 @@ class DirectVideoWriter(LosslessWriter):
         ]
         if vf:
             cmd += ["-vf", vf]
-        cmd += ["-c:a", "aac", "-b:a", args.audio_bitrate, "-shortest"]
+        # Keep every rendered frame even when source audio ends slightly earlier.
+        # -shortest still bounds audio for --max-frames and other partial renders.
+        cmd += ["-c:a", "aac", "-b:a", args.audio_bitrate, "-af", "apad", "-shortest"]
         if self.destination.suffix.lower() in {".mp4", ".mov", ".m4v"}:
             cmd += ["-movflags", "+faststart"]
         cmd += [str(self.partial)]

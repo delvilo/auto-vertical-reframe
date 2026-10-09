@@ -413,6 +413,9 @@ pipeline 欄位相同；整條管線計時到 writer 完成為止，不包含之
 是否下降。除了此段穩定影片，也應比較多人交錯、主角暫時消失及切鏡片段；
 新的跳幀條件可能改變追蹤與構圖，不能只看速度。新版的 T4 收益仍需用此測試實測。
 
+短音訊造成尾幀截斷的單次回歸，請使用 [Colab 音訊尾端測試](docs/colab-audio-tail.md)
+及其內附 notebook；它先做兩秒 mux 短測，再跑一次完整 gap1，保留現有構圖與 DeepGaze 策略。
+
 ## Architecture
 
 | Module | Responsibility |
