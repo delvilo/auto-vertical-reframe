@@ -133,6 +133,8 @@ editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程�
 | `--seg-max-gap` | `3`；兩次 YOLO 分割間隔的來源幀數上限，正整數。`1` 關閉跳幀，提供逐幀比較基準 |
 | `--seg-max-age` | `0.1`；距上次真實分割的影片時間上限（秒），必須是有限正數；與幀數上限一起生效 |
 | `--seg-thumbnail-mode` | `lazy`；確定需要畫面判斷或光流時才建立縮圖。`eager` 保留原先每幀縮圖方式，供同版本對照 |
+| `--seg-thumbnail-method` | `gray-area`；先轉灰階，再以 `INTER_AREA` 縮小單通道影像。`bgr-area` 保留先縮小 BGR 再轉灰階的方式，供對照 |
+| `--seg-skip-policy` | `primary`；僅在符合安全條件時，容許遠離主角的遺失次要人物不阻止跳幀。`all` 保留所有追蹤目標皆須穩定的條件 |
 
 例如 60 fps 下，最大 3 幀約為 0.05 秒；較低 FPS 時，0.1 秒上限可能使實際間隔縮短。
 開場及不穩定片段維持逐幀偵測，間隔上限不是固定每三幀才允許偵測。
@@ -149,9 +151,17 @@ Saliency 三級策略、DeepGaze 的 16 幀 CPU ring、相機平滑及編碼仍�
 `lazy` 先檢查既有的「沒有追蹤目標、已要求刷新、不支援的 tracker、追蹤未穩定」條件；
 已確定要跑 YOLO 的影格可延後縮圖。後續畫面變化、信心、偵測年齡與間隔判斷維持原順序。
 需要畫面比較或光流時，才補建恰好相鄰的 N−1 與 N 幀縮圖；已建立的縮圖直接重用，
-每幀最多建立一次，切鏡、重置及結束會清除快取。仍使用長邊 320 的 `INTER_AREA`，先縮小再轉灰階。
+每幀最多建立一次，切鏡、重置及結束會清除快取。長邊仍為 320，預設先轉灰階，
+再以 `INTER_AREA` 縮小單通道影像；這會改變整數捨入位置，需重新比較判斷與畫面品質，
+不保證與 `bgr-area` 逐像素相同。YOLO、Pose 與 DeepGaze 的模型輸入及精度設定不變。
 此方式保留上一幀原始影像的唯讀參照；半幅 precrop 是 view，可能暫時持有整張 4K BGR 影像，
 約增加 25 MB 主機記憶體。實際節省張數需扣除補建上一幀縮圖的次數。
+
+`primary` 只放寬「遠處已遺失的次要人物」：以最多 3 個來源幀的運動範圍、3σ 不確定性
+及主角尺寸的安全距離檢查是否可能接近主角。主角未選定／遺失、次要人物新出現／未確認、
+運動資料不可靠或可能交錯，仍立即要求偵測；所有已觀測人物的低信心、稳定度與光流檢查
+仍保留。`seg_gate_diagnostics` 記錄排程時第一個不穩定原因；其中 `distant_lost_allowed`
+只是通過這層檢查的幀數，後续條件仍可能要求偵測，不能當作實際跳幀數。
 
 ### 方案 C：三級自動構圖與按需 DeepGaze MR
 
@@ -256,11 +266,17 @@ Summary 保留 `frames_with_head_cues`、`frames_with_pose`、`pose_rois_inferre
 頭腳裁切、主角遺失、鏡頭抖動與音畫同步。確認短片後，移除 `--max-frames 90`
 並更換輸出檔名處理完整影片。驗證範圍見 [MR_VALIDATION.md](MR_VALIDATION.md)。
 
-### Colab T4：縮圖成本與偵測間隔比較
+### Colab T4：縮圖、安全跳幀與顯著性計時比較
 
-先前上傳的 600 幀 T4 測試中，gap 3 僅省 13 次 YOLO，第二輪耗時反而比 gap 1 多
-11.4%。新版提供 `lazy` 與 `eager` 同版本對照，用細分計時確認縮圖／排程成本。
-`eager` 保留先前每幀建立縮圖的行為；其他偵測條件、模型與精度設定相同。
+**170 秒／完整長影片測試**：請使用 [長影片 Colab 測試流程](docs/colab-long-video.md)。
+它使用 `--full-video`，並每 5 秒影片時間及切鏡輸出分段 YOLO 頻率、實際偵測間隔與耗時。
+可選完整暖機、短暖機，或先比較逐幀基準與完整優化兩組；不為統計重置追蹤或快取。
+
+2026-10-09 上傳的同批 600 幀測試中，lazy 相較 eager 整體省時 4.8%，但仍比 gap 1
+慢 5.2%；縮圖仍占 8.19 秒，而且只省 13 次 YOLO。新版分別量測「先轉灰階」與
+「放寬遠處遺失次要人物的跳幀否決條件」的效果，並細分顯著性與整條管線計時。
+這些改動沒有增加 GPU 模型、CUDA stream 或並行推論；不能據此保證所有 CUDA 組合
+都不會出錯，也不能在尚未取得新版 T4 結果前承諾加速比例。
 
 在已安裝專案並掛載 Drive 的 Colab 執行以下 Python cell。使用 Python 3.13+；
 `git pull --ff-only` 更新目前 checkout，測試不重新安裝 PyTorch，也不清除權重快取。
@@ -273,33 +289,59 @@ import subprocess, sys
 assert sys.version_info >= (3, 13), "需要 Python 3.13+"
 repo = Path("/content/auto-vertical-reframe")
 video = Path("/content/drive/MyDrive/video/1080p/crop/vv110.mp4")
-run_dir = Path("/content") / ("reframe-benchmark-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
+stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+smoke_dir = Path("/content") / ("reframe-smoke-" + stamp)
+run_dir = Path("/content") / ("reframe-benchmark-" + stamp)
 subprocess.run(["git", "pull", "--ff-only"], cwd=repo, check=True)
 
 def checkpoint(name):
     return str(next((p for p in (video.parent / name, repo / name) if p.is_file()), Path(name)))
 
-subprocess.run([
+common = [
     sys.executable, "-u", str(repo / "scripts/benchmark_colab.py"),
-    "--input", str(video), "--output-dir", str(run_dir),
-    "--max-frames", "600", "--repeats", "2",
+    "--input", str(video),
     "--seg-model", checkpoint("yolo26n-seg.pt"),
     "--pose-model", checkpoint("yolo26n-pose.pt"),
     "--device", "0", "--saliency-device", "cuda", "--video-encoder", "hevc_nvenc",
-], cwd=repo, check=True)
+]
+# 先執行單組 60 幀 GPU 短測；失敗會保留原始 log 並在此停止。
+subprocess.run(common + ["--output-dir", str(smoke_dir), "--smoke"], cwd=repo, check=True)
+print("短測資料：", smoke_dir)
+```
+
+檢查短測影片與 `results.json` 的 `device_validation`：分割、Pose、DeepGaze 有實際呼叫
+才可標記 `cuda_verified`；`not_exercised` 表示該短片未觸發模型，並非 GPU 測試通過。
+若未觸發 DeepGaze，需選用資訊不足的片段或延長短測，再檢查該模型。確認後執行：
+
+```python
+subprocess.run(common + ["--output-dir", str(run_dir), "--max-frames", "600", "--repeats", "2"],
+               cwd=repo, check=True)
 print("測試資料：", run_dir)
 ```
 
-收集器比較 `gap1-lazy`（逐幀基準）、`gap3-eager`（原縮圖方式）、`gap3-lazy`（延遲縮圖）。
-每組先暖機一次，再量測兩輪並反轉順序，共 **9 次程序**；每次最多 600 幀。
-若每次仍需約兩分鐘，整組約需 18 分鐘。每次獨立程序仍含模型初始化；暖機結果保留但
-不納入中位數。預設使用 middle、鎖定首位主角、conf=0.3、dead-zone=0.06、FP32 saliency
-及關閉 post-restore，與上傳的四份 log 設定相同。
+預設四組，每相鄰兩組只改一個條件：
 
-原始 stdout/stderr 同時保留在終端與 `.log`；錯誤會保存已完成的資料並以非零狀態停止。
+| 組別 | YOLO 最大間隔 | 縮圖方法 | 跳幀條件 |
+| --- | --- | --- | --- |
+| `gap1-baseline` | 1 | `bgr-area`（不需要追蹤縮圖） | `all` |
+| `gap3-bgr-all` | 3 | `bgr-area` | `all` |
+| `gap3-gray-all` | 3 | `gray-area` | `all` |
+| `gap3-gray-primary` | 3 | `gray-area` | `primary` |
+
+四組均使用 lazy，顯著性細分計時也全部啟用。每組先暖機一次，再量測兩輪並反轉順序，
+共 **12 次程序**；每次最多 600 幀。若每次約兩分鐘，約需 24 分鐘，另加短測與首次下載。
+每次獨立程序仍含模型初始化；暖機及短測結果保留但
+不納入中位數。預設使用 middle、鎖定首位主角、conf=0.3、dead-zone=0.06、FP32 saliency
+及關閉 post-restore。需要重跑舊的三組 eager／lazy 對照時，加上 `--suite thumbnails`；
+該組合全部使用 `bgr-area` 與 `all`，不混入新策略。
+
+原始 stdout/stderr、CUDA 錯誤與 traceback 同時保留在終端與 `.log`；錯誤會保存已完成的
+資料並以非零狀態停止。明確指定 CUDA 時，收集器拒絕已執行模型的 CPU fallback 及
+DeepGaze 失敗 fallback；指定 NVENC 時也拒絕編碼器 fallback，不將其算作有效加速結果。
 輸出目錄必須不存在，以避免混入先前結果。程式另保存：
 
-- `results.json`：全部 Summary、實際命令、環境／Git 資訊、ffprobe 結果與失敗原因。
+- `results.json`：全部 Summary、實際命令、環境／Git／套件版本、PyTorch CUDA build、
+  實際模型裝置、ffprobe 結果與失敗原因。
 - `results.csv`：逐次攤平的計時、計數與輸出驗證資料。
 - `aggregates.csv`：排除暖機與失敗執行後，各組數值的中位數。
 - 各組 MP4 與原始 log：ffprobe 檢查實際影格數、FPS、尺寸與音訊是否存在；記錄音畫時間戳，
@@ -320,13 +362,25 @@ columns = ["case", "measured_runs", "median.summary.elapsed_seconds",
            "median.summary.seg_timing_seconds.model_track",
            "median.summary.seg_timing_seconds.parse_masks",
            "median.summary.seg_thumbnail_builds",
-           "median.summary.seg_detector_calls", "median.summary.seg_predicted_frames"]
+           "median.summary.seg_detector_calls", "median.summary.seg_predicted_frames",
+           "median.summary.stage_wall_seconds.saliency",
+           "median.summary.saliency_actual_forward_calls",
+           "median.summary.saliency_timing_seconds.preparation",
+           "median.summary.saliency_timing_seconds.observe",
+           "median.summary.saliency_timing_seconds.selection_cache",
+           "median.summary.saliency_deepgaze_timing_seconds.init",
+           "median.summary.saliency_deepgaze_timing_seconds.transfer",
+           "median.summary.saliency_deepgaze_timing_seconds.forward",
+           "median.summary.saliency_deepgaze_timing_seconds.postprocess",
+           "median.summary.pipeline_timing_seconds.decode",
+           "median.summary.pipeline_timing_seconds.scene"]
 display(df[[c for c in columns if c in df.columns]])
 archive = run_dir.with_suffix(".zip")
 with ZipFile(archive, "w", ZIP_DEFLATED) as bundle:
-    for path in sorted(run_dir.iterdir()):
-        if path.suffix in {".log", ".json", ".csv"}:
-            bundle.write(path, path.name)
+    for directory in (smoke_dir, run_dir):
+        for path in sorted(directory.iterdir()):
+            if path.suffix in {".log", ".json", ".csv"}:
+                bundle.write(path, directory.name + "/" + path.name)
 files.download(str(archive))
 ```
 
@@ -334,14 +388,30 @@ files.download(str(archive))
 `parse_masks`、`flow`、`predict`、`bookkeeping`，總和應等於 `seg_total_seconds`。
 它們是主機 wall time，沒有增加逐幀 CUDA 強制同步；`model_track` 含 YOLO 前後處理與
 ByteTrack，`parse_masks` 可能包含 GPU→CPU 等待，不能解讀成各模型的純 GPU kernel 時間。
-`scheduler` 只計入 `track()` 內的排程與穩定度更新；姿態後的 feedback 維持計入 saliency 階段。
+`scheduler` 只計入 `track()` 內的排程與穩定度更新；姿態後的 feedback 另外計入
+`pipeline_timing_seconds.feedback`。`timing_schema_version=2` 的 saliency 階段已排除 feedback，
+與舊 log 比較該階段時需一併考慮，不應把此計時歸類變動當作加速。
 `seg_flow_seconds` 保留為 `flow` 分項的相同值，不能再加總一次。
+
+新細分計時分為三層，每一層各自互斥，**不同層不可相加**：
+
+| 計時欄位 | 內容與核對方式 |
+| --- | --- |
+| `pipeline_timing_seconds` | `setup`、`decode`、`scene`、`segmentation`、`pose`、`feedback`、`saliency`、`subjects`、`camera`、`render_write`、`bookkeeping`、`finalization`；總和等於 `elapsed_seconds` |
+| `saliency_timing_seconds` | `preparation`、`observe`、`selection_cache`、`cheap`、`deepgaze`、`bookkeeping`；總和等於 `saliency_total_seconds`，包含於管線的 saliency 階段 |
+| `saliency_deepgaze_timing_seconds` | `init`、`observe`、`preprocess`、`transfer`、`forward`、`postprocess`、`fallback`、`bookkeeping`；總和等於 `saliency_deepgaze_total_seconds`，分別包含於上一層的 observe 與 deepgaze |
+
+收集器驗證每層合計與有限非負數值。`stage_wall_seconds` 保留四個既有欄位，與對應的
+pipeline 欄位相同；整條管線計時到 writer 完成為止，不包含之後的模型資源清理。
+新增計時僅讀取主機時鐘，沒有逐幀 `torch.cuda.synchronize()`；`forward` 包含主機提交 GPU
+工作的時間，既有 GPU→CPU 等待主要會出現在 `postprocess`，兩者都不是純 CUDA kernel 時間。
 
 `seg_thumbnail_builds` 是實際縮圖張數；`seg_thumbnail_backfills` 是其中補建上一幀的張數；
 `seg_thumbnail_cache_hits` 是重用上一幀灰階的次數；`seg_thumbnail_deferred_frames` 表示
 當下沒有建立本幀縮圖，之後可能補建，並非最終省下的張數。`seg_flow_attempts` 含失敗的光流嘗試。
-比較 eager／lazy 的 YOLO 呼叫、刷新原因、Pose／DeepGaze 次數及輸出品質，再確認縮圖與整體耗時
-是否下降；新版的 T4 收益仍需用此測試實測。
+比較四組的 YOLO 呼叫、刷新原因、Pose／DeepGaze 次數及輸出品質，再確認縮圖與整體耗時
+是否下降。除了此段穩定影片，也應比較多人交錯、主角暫時消失及切鏡片段；
+新的跳幀條件可能改變追蹤與構圖，不能只看速度。新版的 T4 收益仍需用此測試實測。
 
 ## Architecture
 

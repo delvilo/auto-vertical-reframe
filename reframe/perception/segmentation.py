@@ -132,6 +132,7 @@ class SegmentationTracker:
         self.motion = SparseMotion()
         self._counts = Counter()
         self._reasons = Counter()
+        self._gate_diagnostics = Counter()
         self._timings = dict.fromkeys(("thumbnail", "scheduler", "frame_change", "model_track",
                                       "parse_masks", "flow", "predict", "bookkeeping"), 0.0)
         self._total_seconds = 0.0
@@ -140,6 +141,7 @@ class SegmentationTracker:
         self._clear()
 
     def _clear(self):
+        self.last_decision = None
         self._previous = None
         self._previous_frame = None
         self._gray = None
@@ -185,13 +187,19 @@ class SegmentationTracker:
         if self._previous_frame is not None:
             self._counts["thumbnail_deferred_frames"] += 1
 
-    @staticmethod
-    def _thumbnail(frame):
+    def _thumbnail(self, frame):
         h, w = frame.shape[:2]
         scale = min(1., 320 / max(h, w))
-        small = cv2.resize(frame, (max(8, round(w * scale)), max(8, round(h * scale))),
-                           interpolation=cv2.INTER_AREA)
-        return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        size = (max(8, round(w * scale)), max(8, round(h * scale)))
+        if self.config.seg_thumbnail_method == "bgr-area":
+            small = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+            return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        # Color conversion and area averaging are linear before integer rounding.
+        # Resizing one channel avoids processing all three at full resolution;
+        # the full-size gray buffer is temporary CPU memory, never a GPU tensor.
+        # Rounding can change pixels slightly, so retain the old comparison path.
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
 
     def _changed(self, gray):
         delta = cv2.absdiff(self._gray, gray)
@@ -199,8 +207,95 @@ class SegmentationTracker:
         tiles = cv2.resize(delta, (8, 6), interpolation=cv2.INTER_AREA)
         return float(delta.mean()) > 18 or float(tiles.max()) > 35
 
+    @staticmethod
+    def _motion_envelope(track, horizon):
+        """Conservative CPU-only XYAH envelope; never mutate native Kalman state."""
+        mean = np.asarray(track.mean)
+        covariance = np.asarray(track.covariance)
+        box = np.asarray(track.xyxy, dtype=np.float64)
+        if (mean.shape != (8,) or covariance.shape != (8, 8)
+                or not np.isfinite(mean).all() or not np.isfinite(covariance).all()
+                or not np.isfinite(box).all() or np.any(box[2:] <= box[:2])
+                or np.any(np.diag(covariance) < 0)):
+            return None
+        # TrackState.Lost sets height velocity to zero in native multi_predict.
+        # Include center/aspect drift and growing velocity uncertainty over all
+        # possible intermediate frames, not only the last observed rectangle.
+        from ultralytics.trackers.basetrack import TrackState
+        end = mean.copy()
+        velocity = mean[4:].copy()
+        if track.state != TrackState.Tracked:
+            velocity[3] = 0
+        end[:4] += horizon * velocity
+        if end[2] <= 0 or end[3] <= 0:
+            return None
+        size = np.maximum(box[2:] - box[:2], (end[2] * end[3], end[3]))
+        sigma = np.sqrt(np.diag(covariance))
+        # XYAH uncertainty expands dimensions as well as the center. Additive
+        # standard deviations are deliberately conservative without assuming
+        # independent state components or changing Kalman covariance.
+        spread = 3 * (sigma[:4] + horizon * sigma[4:])
+        width_extra = (max(mean[3], end[3]) * spread[2]
+                       + max(mean[2], end[2]) * spread[3] + spread[2] * spread[3])
+        margin = spread[:2] + .5 * np.array([width_extra, spread[3]])
+        return np.concatenate((np.minimum(mean[:2], end[:2]) - size / 2 - margin,
+                               np.maximum(mean[:2], end[:2]) + size / 2 + margin))
+
+    def _unsettled_detail(self, native):
+        """Allow only distant lost bystanders; every observed track stays guarded."""
+        if getattr(self.config, "seg_skip_policy", "primary") == "all":
+            if native.lost_stracks:
+                return "all_lost_tracks"
+            if any(not t.is_activated for t in native.tracked_stracks):
+                return "all_unconfirmed_tracks"
+            if {t.track_id for t in native.tracked_stracks} != {t.track_id for t in self._tracks}:
+                return "all_track_set_changed"
+            return None
+
+        if self._primary_id is None:
+            return "primary_unselected"
+        by_id = {t.track_id: t for t in native.tracked_stracks}
+        observed_ids = {t.track_id for t in self._tracks}
+        if (len(by_id) != len(native.tracked_stracks) or len(observed_ids) != len(self._tracks)
+                or None in observed_ids):
+            return "ambiguous_track_ids"
+        primary = by_id.get(self._primary_id)
+        if (primary is None or self._primary_id not in observed_ids
+                or any(t.track_id == self._primary_id for t in native.lost_stracks)):
+            return "primary_missing_or_lost"
+        if not primary.is_activated:
+            return "primary_unconfirmed"
+        if any(not t.is_activated for t in native.tracked_stracks):
+            return "secondary_unconfirmed"
+        # Never discard a secondary observation or bypass a newly visible ID.
+        # Such tracks still need measurement/stability/flow checks as before.
+        if by_id.keys() - observed_ids:
+            return "secondary_new_or_unreported"
+        if observed_ids - by_id.keys():
+            return "secondary_missing"
+        if not native.lost_stracks:
+            return None
+        horizon = min(self.config.seg_max_gap, 3)
+        primary_envelope = self._motion_envelope(primary, horizon)
+        if primary_envelope is None:
+            return "primary_uncertain_motion"
+        primary_box = np.asarray(primary.xyxy)
+        guard = .5 * (primary_box[2:] - primary_box[:2])
+        primary_envelope += np.concatenate((-guard, guard))
+        for track in native.lost_stracks:
+            envelope = self._motion_envelope(track, horizon)
+            if envelope is None:
+                return "secondary_lost_uncertain"
+            if np.all(np.minimum(envelope[2:], primary_envelope[2:])
+                      >= np.maximum(envelope[:2], primary_envelope[:2])):
+                return "secondary_lost_near_primary"
+        # Counts eligible scheduler visits, not lost objects or actual skips:
+        # frame-change, age, confidence and full observed-track flow still run.
+        self._gate_diagnostics["distant_lost_allowed"] += 1
+        return None
+
     def _metadata_reason(self):
-        """Only the original pre-image gates may short-circuit thumbnail work."""
+        """Metadata gates precede thumbnails; image and motion checks still follow."""
         if not self._tracks:
             return "no_tracks", None
         if self._force:
@@ -208,8 +303,9 @@ class SegmentationTracker:
         native = self._native()
         if native is None:
             return "unsupported_tracker", None
-        if (native.lost_stracks or any(not t.is_activated for t in native.tracked_stracks)
-                or {t.track_id for t in native.tracked_stracks} != {t.track_id for t in self._tracks}):
+        detail = self._unsettled_detail(native)
+        if detail is not None:
+            self._gate_diagnostics[detail] += 1
             return "unsettled_tracks", native
         return None, native
 
@@ -255,7 +351,14 @@ class SegmentationTracker:
         # Commit only after all flow proposals pass. Preserve covariance growth;
         # optical flow is a correction, not a new Kalman detector measurement.
         native.frame_id += 1
-        native.multi_predict(native.tracked_stracks)
+        # A far-away lost track may now coexist with a predicted frame. Advance
+        # its Kalman state too, exactly once per source frame, so re-association
+        # uses the correct motion/clock at the next real detection. Native
+        # update still owns expiration and matching; no empty detection update.
+        tracked_ids = {t.track_id for t in native.tracked_stracks}
+        pool = [*native.tracked_stracks,
+                *(t for t in native.lost_stracks if t.track_id not in tracked_ids)]
+        native.multi_predict(pool)
         by_id = {t.track_id: t for t in native.tracked_stracks}
         output = []
         for track in self._tracks:
@@ -273,6 +376,7 @@ class SegmentationTracker:
 
     def track(self, frame: np.ndarray, context: FrameContext | None = None) -> tuple[TrackObservation, ...]:
         """Callers must not mutate a supplied frame before the following call."""
+        self.last_decision = None
         started = time.perf_counter()
         before = sum(self._timings.values())
         try:
@@ -328,6 +432,8 @@ class SegmentationTracker:
                     self._counts["predicted_frames"] += 1
                     self._max_age = max(self._max_age, context.timestamp - self._measured_context.timestamp)
                     self._remember(frame, context, tracks, gray)
+                    self.last_decision = {"frame_index": context.frame_index, "detected": False,
+                                          "reason": None, "interval": self._interval}
                     return tracks
         self._reasons[reason] += 1
         if reason not in {"scheduled", "age_limit", "every_frame"}:
@@ -345,6 +451,8 @@ class SegmentationTracker:
         self._timed("scheduler", self._update_stability, tracks, context)
         self._remember(frame, context, tracks, gray)
         self._force = None
+        self.last_decision = {"frame_index": context.frame_index, "detected": True,
+                              "reason": reason, "interval": self._interval}
         return tracks
 
     def feedback(self, observations: FrameObservations, preferred_track_id: int | None = None) -> None:
@@ -369,6 +477,7 @@ class SegmentationTracker:
                 "timing_seconds": dict(self._timings),
                 "total_seconds": self._total_seconds,
                 "thumbnail_mode": self.config.seg_thumbnail_mode,
+                "thumbnail_method": self.config.seg_thumbnail_method,
                 "thumbnail_builds": self._counts["thumbnail_builds"],
                 "thumbnail_cache_hits": self._counts["thumbnail_cache_hits"],
                 "thumbnail_backfills": self._counts["thumbnail_backfills"],
@@ -376,6 +485,8 @@ class SegmentationTracker:
                 "flow_attempts": self._counts["flow_attempts"],
                 "max_prediction_age_seconds": self._max_age,
                 "max_interval": self._max_interval,
+                "skip_policy": getattr(self.config, "seg_skip_policy", "primary"),
+                "gate_diagnostics": dict(self._gate_diagnostics),
                 "refresh_reasons": dict(self._reasons)}
 
     def close(self) -> None:

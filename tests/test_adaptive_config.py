@@ -13,6 +13,8 @@ class AdaptiveConfigTests(unittest.TestCase):
         self.assertEqual(args.seg_max_gap, 3)
         self.assertEqual(args.seg_max_age, 0.1)
         self.assertEqual(args.seg_thumbnail_mode, "lazy")
+        self.assertEqual(args.seg_thumbnail_method, "gray-area")
+        self.assertEqual(args.seg_skip_policy, "primary")
         self.assertFalse(args.post_restore)
 
     def test_baseline_and_precrop_are_independent(self):
@@ -59,6 +61,15 @@ class AdaptiveConfigTests(unittest.TestCase):
         self.assertEqual(args.seg_thumbnail_mode, "eager")
         with self.assertRaisesRegex(ValueError, "seg-thumbnail-mode"):
             validate_config(AppConfig(input="in.mp4", output="out.mp4", seg_thumbnail_mode="fast"))
+
+    def test_optimization_reference_options_and_validation(self):
+        args = parse_args(["in.mp4", "out.mp4", "--seg-thumbnail-method", "bgr-area",
+                           "--seg-skip-policy", "all"])
+        self.assertEqual(args.seg_thumbnail_method, "bgr-area")
+        self.assertEqual(args.seg_skip_policy, "all")
+        for key in ("seg_thumbnail_method", "seg_skip_policy"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key.replace("_", "-")):
+                validate_config(AppConfig(input="in.mp4", output="out.mp4", **{key: "bad"}))
 
 
 if __name__ == "__main__":

@@ -25,11 +25,16 @@ from reframe.scenes import detect_scenes, InlineSceneDetector
 from reframe.video_io import (DirectVideoWriter, LosslessWriter, build_video_filters,
                               run_ffmpeg_mux, iter_video_frames)
 from reframe.debug import draw_debug
+from reframe.timing import PhaseTimings
+from reframe.segments import SEGMENT_SCHEMA_VERSION, SegmentStats, counter_snapshot
 
 
 def process_video(args: AppConfig) -> None:
     started = time.perf_counter()
-    stage_seconds = dict(segmentation=0.0, pose=0.0, saliency=0.0, render_write=0.0)
+    pipeline_timings = PhaseTimings(("setup", "decode", "scene", "segmentation", "pose",
+                                    "feedback", "saliency", "subjects", "camera",
+                                    "render_write", "bookkeeping", "segment_logging", "finalization"),
+                                   "setup", started)
     input_path = Path(args.input)
     output_path = Path(args.output)
     if input_path.resolve() == output_path.resolve():
@@ -103,6 +108,7 @@ def process_video(args: AppConfig) -> None:
                 "Speaker-aware mode has no mapped segments and will not affect ranking"
             )
     if args.scene_method == "prepass":
+        pipeline_timings.switch("scene")
         scene_start_set = set(
             detect_scenes(
                 str(input_path),
@@ -111,6 +117,7 @@ def process_video(args: AppConfig) -> None:
                 args.scene_downscale,
             )
         )
+        pipeline_timings.switch("setup")
         inline_scene = None
     else:
         scene_start_set = set()
@@ -197,7 +204,42 @@ def process_video(args: AppConfig) -> None:
             resources.callback(frames.close)
             actual_yolo_device = None
 
-            for frame_idx, frame in frames:
+            def segment_snapshot(phase_overrides=None):
+                seconds = pipeline_timings.snapshot()
+                if phase_overrides:
+                    seconds.update(phase_overrides)
+                return counter_snapshot(stats, tracker.telemetry(), saliency_helper.telemetry(),
+                                        pose_helper, seconds)
+
+            segments = (SegmentStats(fps, args.stats_interval, segment_snapshot())
+                        if args.stats_interval > 0 else None)
+
+            def emit_segment(reason, resume_phase, phase_overrides=None):
+                if segments is None or not segments.has_frames:
+                    return
+                # Keep report construction and terminal IO outside sampled frame
+                # phases. The outer Summary still accounts for this overhead.
+                pipeline_timings.switch("segment_logging")
+                row = segments.finish(segment_snapshot(phase_overrides), reason)
+                logging.info("Segment: %s", json.dumps(row, ensure_ascii=False, allow_nan=False))
+                pipeline_timings.switch(resume_phase)
+
+            final_phase_overrides = None
+
+            while True:
+                pipeline_timings.switch("decode")
+                # Two scalar reads allow a cut-frame's decode/scene work to be
+                # assigned to its new scene without copying model telemetry on
+                # every frame. The EOF probe is likewise excluded from segments.
+                before_frame_phases = ({key: pipeline_timings.seconds[key]
+                                        for key in ("decode", "scene")}
+                                       if segments is not None else None)
+                try:
+                    frame_idx, frame = next(frames)
+                except StopIteration:
+                    final_phase_overrides = before_frame_phases
+                    break
+                pipeline_timings.switch("scene")
                 inference_frame = region.crop(frame)
                 is_cut = (
                     inline_scene.update(frame, frame_idx)
@@ -205,6 +247,7 @@ def process_video(args: AppConfig) -> None:
                     else frame_idx in scene_start_set
                 )
                 if is_cut:
+                    emit_segment("scene", "scene", before_frame_phases)
                     tracker.reset()
                     if pose_helper is not None:
                         pose_helper.clear()
@@ -218,21 +261,20 @@ def process_video(args: AppConfig) -> None:
                     last_subject_key = None
 
                 context = region.context(frame_idx, (frame_idx - 1) / fps, scene_index)
-                stage_started = time.perf_counter()
+                pipeline_timings.switch("segmentation")
                 tracks = tracker.track(inference_frame, context)
-                stage_seconds["segmentation"] += time.perf_counter() - stage_started
                 actual_yolo_device = tracker.actual_device
-                stage_started = time.perf_counter()
+                pipeline_timings.switch("pose")
                 local_observations = observe_poses(inference_frame, tracks, pose_helper, state,
                                                    context, args.cue_top_k,
                                                    tracking_max_age=args.seg_max_age)
-                stage_seconds["pose"] += time.perf_counter() - stage_started
-                stage_started = time.perf_counter()
+                pipeline_timings.switch("feedback")
                 primary_id = state.lock_track_id if state.lock_track_id is not None else state.tracked_id
                 tracker.feedback(local_observations, preferred_track_id=primary_id)
+                pipeline_timings.switch("saliency")
                 saliency = saliency_helper.process(inference_frame, local_observations,
                                                    preferred_track_id=primary_id)
-                stage_seconds["saliency"] += time.perf_counter() - stage_started
+                pipeline_timings.switch("subjects")
                 observations = region.to_source(local_observations)
                 saliency_map = saliency.map
                 candidates = build_candidates(
@@ -261,6 +303,7 @@ def process_video(args: AppConfig) -> None:
                         is_pair_active,
                     )
 
+                pipeline_timings.switch("camera")
                 if pair is not None and not pair_fits(
                     pair, base_crop_w, base_crop_h, args.fixed_zoom or args.min_zoom
                 ):
@@ -465,7 +508,7 @@ def process_video(args: AppConfig) -> None:
                 crop_w, crop_h = current_crop_size(
                     base_crop_w, base_crop_h, state.zoom, frame_w, frame_h
                 )
-                stage_started = time.perf_counter()
+                pipeline_timings.switch("render_write")
                 cropped, crop_rect = crop_frame(
                     frame, state.crop_center_x, state.crop_center_y, crop_w, crop_h
                 )
@@ -491,9 +534,12 @@ def process_video(args: AppConfig) -> None:
                     )
                     debug_writer.write(dbg)
 
-                stage_seconds["render_write"] += time.perf_counter() - stage_started
-
+                pipeline_timings.switch("bookkeeping")
                 stats["frames_processed"] += 1
+                if segments is not None:
+                    segments.record_frame(frame_idx, scene_index, tracker.last_decision)
+                    if segments.window_complete():
+                        emit_segment("interval", "bookkeeping")
                 if args.max_frames is not None and stats["frames_processed"] >= args.max_frames:
                     logging.info("Reached diagnostic frame limit: %s", args.max_frames)
                     break
@@ -510,6 +556,8 @@ def process_video(args: AppConfig) -> None:
                         saliency_telemetry.get("active_backend"),
                     )
 
+            emit_segment("end", "bookkeeping", final_phase_overrides)
+            pipeline_timings.switch("finalization")
             writer.release()
             if debug_writer is not None:
                 debug_writer.release()
@@ -547,10 +595,17 @@ def process_video(args: AppConfig) -> None:
                     )
 
             saliency_telemetry = saliency_helper.telemetry()
-            elapsed = time.perf_counter() - started
+            elapsed = pipeline_timings.switch(None) - started
+            stage_seconds = {key: pipeline_timings.seconds[key]
+                             for key in ("segmentation", "pose", "saliency", "render_write")}
             summary = {
                 "preset": args.preset,
                 "frames_processed": stats["frames_processed"],
+                "stats_interval": args.stats_interval,
+                "segment_schema_version": SEGMENT_SCHEMA_VERSION,
+                "segments_emitted": segments.emitted if segments is not None else 0,
+                "segment_pipeline_timing_seconds": (dict(segments.pipeline_timing_seconds)
+                                                    if segments is not None else {}),
                 "scene_resets": stats["scene_resets"],
                 "frames_with_subject": stats["frames_with_subject"],
                 "frames_with_head_cues": stats["frames_with_head_cues"],
@@ -565,6 +620,13 @@ def process_video(args: AppConfig) -> None:
                 "elapsed_seconds": elapsed,
                 "processing_fps": stats["frames_processed"] / max(elapsed, 1e-9),
                 "stage_wall_seconds": stage_seconds,
+                # Since schema 2, feedback has its own phase instead of being
+                # included in saliency. Nested saliency/backend timers must not
+                # be added to these exclusive pipeline phases.
+                "timing_schema_version": 2,
+                "pipeline_timing_seconds": dict(pipeline_timings.seconds),
+                "pipeline_timing_kind": "exclusive_host_wall",
+                "pipeline_timing_scope": "through_writer_finalization_before_resource_cleanup",
                 "encode_mode": args.encode_mode,
                 "seg_model": args.seg_model,
                 "seg_max_gap": args.seg_max_gap,

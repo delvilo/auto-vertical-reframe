@@ -19,6 +19,7 @@ from reframe.geometry import box_iou
 from reframe.saliency.base import SaliencyBackend
 from reframe.saliency.backends.handcrafted import HandcraftedSaliencyHelper
 from reframe.saliency.cache import SaliencyCache
+from reframe.timing import HostTimings, timed_method
 
 
 class CascadeSaliencyService:
@@ -51,6 +52,8 @@ class CascadeSaliencyService:
         self.reason_counts: Counter[str] = Counter()
         self.total_frames = self.deepgaze_requests = self.cheap_predictions = 0
         self.tier_transitions = self.cache_hits = 0
+        self._timings = HostTimings(("preparation", "observe", "selection_cache",
+                                    "cheap", "deepgaze", "bookkeeping"))
         self.reset()
 
     def reset(self) -> None:
@@ -230,6 +233,7 @@ class CascadeSaliencyService:
         delta, tile = self._change(gray, self._cache_gray)
         return delta < 0.015 and tile < 0.045 and self._same_tracks(tracks, self._cache_tracks, strict=True)
 
+    @timed_method("bookkeeping")
     def _finish(self, result: SaliencyResult, tier: str, reason: str,
                 observations: FrameObservations, gray: np.ndarray) -> SaliencyResult:
         if self._tier is not None and tier != self._tier:
@@ -240,6 +244,7 @@ class CascadeSaliencyService:
         self._previous, self._gray = observations, gray
         return result
 
+    @timed_method("selection_cache")
     def process(self, frame: np.ndarray, observations: FrameObservations, *,
                 preferred_track_id: int | None = None) -> SaliencyResult:
         context = observations.frame
@@ -260,12 +265,14 @@ class CascadeSaliencyService:
             if (context.scene_index != old.scene_index or (w, h) != (old.width, old.height)
                     or context.frame_index <= old.frame_index or context.timestamp < old.timestamp):
                 self.reset()
-        small = self._resize(frame, self.max_side)
-        cheap_frame = self._resize(small, 160)
-        gray = cv2.cvtColor(cheap_frame, cv2.COLOR_BGR2GRAY)
-        # This is a CPU-only temporal ingest; loading belongs to predict, at L3.
-        self.deep_backend.observe(small, context)
-        self.cheap_backend.observe(cheap_frame, context)
+        with self._timings.measure("preparation"):
+            small = self._resize(frame, self.max_side)
+            cheap_frame = self._resize(small, 160)
+            gray = cv2.cvtColor(cheap_frame, cv2.COLOR_BGR2GRAY)
+        with self._timings.measure("observe"):
+            # CPU-only temporal ingest; loading belongs to predict, at L3.
+            self.deep_backend.observe(small, context)
+            self.cheap_backend.observe(cheap_frame, context)
         self.total_frames += 1
         subjects, reliable, reason = self._subjects(observations, preferred_track_id)
         delta, tile = self._change(gray, self._gray)
@@ -283,12 +290,13 @@ class CascadeSaliencyService:
                                     "stable_reliable_pose")
             return self._finish(result, "pose_only", "stable_reliable_pose", observations, gray)
 
-        prediction = self.cheap_backend.predict(cheap_frame, context)
-        self.cheap_predictions += 1
-        # Reuse the contract validator without contaminating the neural cache.
-        cheap_cache = SaliencyCache()
-        cheap = cheap_cache.refresh(prediction, context, None, gray.shape)
-        enough = reliable or self._cheap_evidence(cheap.map, observations, subjects, reason)
+        with self._timings.measure("cheap"):
+            prediction = self.cheap_backend.predict(cheap_frame, context)
+            self.cheap_predictions += 1
+            # Validate without contaminating the neural cache.
+            cheap_cache = SaliencyCache()
+            cheap = cheap_cache.refresh(prediction, context, None, gray.shape)
+            enough = reliable or self._cheap_evidence(cheap.map, observations, subjects, reason)
         self._cheap_stable_frames = self._cheap_stable_frames + 1 if enough else 0
         if enough:
             # Hold the last neural map briefly while evidence settles; never call
@@ -319,7 +327,8 @@ class CascadeSaliencyService:
             return self._finish(cheap, "handcrafted", "neural_cooldown", observations, gray)
         self._last_deep_request = context
         self.deepgaze_requests += 1
-        prediction = self.deep_backend.predict(small, context)
+        with self._timings.measure("deepgaze"):
+            prediction = self.deep_backend.predict(small, context)
         if prediction.status != "predicted":
             # The backend owns visible diagnostics and fallback reasons.  Do not
             # overwrite a genuine neural inference timestamp with fallback time.
@@ -343,7 +352,10 @@ class CascadeSaliencyService:
                       deepgaze_requests=self.deepgaze_requests,
                       handcrafted_predictions=self.cheap_predictions, cache_hits=self.cache_hits,
                       tier_transitions=self.tier_transitions, tier_reasons=dict(self.reason_counts),
-                      frame_change=self._frame_delta)
+                      frame_change=self._frame_delta,
+                      timing_seconds=dict(self._timings.seconds),
+                      total_seconds=self._timings.total,
+                      timing_kind="exclusive_host_wall")
         for tier in ("pose_only", "handcrafted", "deepgaze"):
             result[f"tier_{tier}_frames"] = self.tier_counts[tier]
         if self._result is not None:

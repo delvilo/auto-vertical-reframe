@@ -1,6 +1,91 @@
 # DeepGaze MR validation and cascade follow-up
 
-Updated: 2026-10-09 (Asia/Taipei). Package version: 0.2.1.
+Updated: 2026-10-10 (Asia/Taipei). Package version: 0.2.1.
+
+## Continuous full-video benchmark and segment telemetry
+
+The collector supports `--full-video`, optional independent `--warmup-frames`,
+the two-case `--suite comparison`, and `--archive` for diagnostics excluding videos.
+Full-video processing uses the decoded source frame count/FPS, not an assumed
+170-second length. Four cases with one full warmup and two full measured runs
+remain available. At 170 seconds, 60 source FPS and 5 processing FPS this is
+122400 processed frames, approximately 6.8 hours before additional overhead.
+
+`--stats-interval 5` emits structured Segment records every five seconds of
+nominal video time and at cuts. Logging does not reset tracking or model caches.
+Rows record real segmentation calls, prediction counts, actual detector gaps,
+scheduled intervals, reasons, Pose ROI counts, saliency activity and exclusive
+host timings. Actual gaps continue across reporting windows and restart at scene
+boundaries. Report construction/IO has its own pipeline `segment_logging` phase;
+setup, finalization and EOF probing are excluded from per-frame segment times.
+The collector checks contiguous coverage and reconciles counters/times with the
+final Summary. Failed/interrupted runs retain already flushed rows marked partial.
+
+Validation completed with Python 3.13.5 on the CPU environment:
+
+- **217 tests and 159 subtests passed**, including fractional FPS, cut/window
+  boundaries, empty detections, cross-window gaps, CLI limits, failed children,
+  partial recovery, timing reconciliation and archive contents.
+- A real collector run used a 90-frame, 60 FPS source, two cases, 8-frame warmups
+  and one complete measured run per case. All four subprocesses succeeded.
+- Each full run produced 90 frames at 60 FPS with audio and four 0.4-second/final
+  partial segments. Both warmups stopped at 8 frames; their results were excluded
+  from medians. Every segment count/timing reconciled with its Summary.
+- The ZIP passed integrity checks and contains logs/JSON/CSV/JSONL, no videos.
+  This fixture exercised segmentation/Pose but did not request DeepGaze, correctly
+  marked `not_exercised`; the earlier real CPU DeepGaze smoke remains below.
+
+The 170-second T4 run has **not** been performed in this environment. Runnable
+Colab cells and a YOLO frequency plot are in [the long-video guide](docs/colab-long-video.md).
+
+## Grayscale thumbnails, primary-aware skips and detailed timing
+
+The tracking thumbnail now defaults to `--seg-thumbnail-method gray-area`:
+convert the inference-region BGR image to uint8 grayscale on CPU, then apply
+the same area resize and geometry. `bgr-area` retains the previous algorithm.
+The temporary full-size grayscale buffer uses host RAM only; YOLO and DeepGaze
+still receive their original BGR inputs. Integer rounding can change thumbnail
+pixels (within 2 levels in the tested synthetic precrops), so pixel-identical
+tracking or rendered output is not claimed.
+
+`--seg-skip-policy primary` permits a distant lost secondary track to coexist
+with prediction only when an identified, activated primary and all visible
+tracks remain eligible. Lost-track motion/covariance envelopes must remain
+outside the guarded primary area. Unconfirmed/new visible IDs, missing primary,
+nearby or uncertain lost tracks, image changes, low confidence, age limits and
+failed optical flow still require detection. Kalman prediction advances both
+visible and lost tracks once per source frame; native ByteTrack retains matching
+and expiration ownership. `all` preserves the previous global veto for comparison.
+`seg_gate_diagnostics` records these decisions; allowed gate visits are not the
+same as successful predicted frames.
+
+Timing schema 2 adds exclusive pipeline phases, cascade phases and nested
+DeepGaze initialization/observation/preprocessing/transfer/forward/postprocessing/
+fallback times. Different layers must not be added together. These are host wall
+times; existing CUDA waits remain where needed for safe host-ring reuse, with
+no new per-frame CUDA synchronization or changes to batch size, device or precision.
+The saliency stage now excludes tracker feedback, which has its own pipeline
+phase. Pipeline totals end after writer finalization, before resource cleanup.
+
+Local verification used Python 3.13.5, PyTorch 2.11.0+cpu and OpenCV 4.14.0:
+
+- Full pytest: **194 passed, 126 subtests passed**.
+- Real 60-frame CPU collector smoke: segmentation and Pose executed; the clip
+  stayed pose-only after settling and truthfully reported DeepGaze unexercised.
+- A second 60-frame CPU render exercised DeepGaze **3 times with zero fallback**,
+  **27 real segmentation calls and 33 predicted frames**. This synthetic static
+  fixture verifies operation, not the skip rate or speed of the user's T4 clip.
+- ffprobe confirmed both renders had 60 frames at the source **60 FPS**, 1-second
+  video, preserved audio and zero start-time offset. Audio duration was 0.981 s;
+  stream metadata does not prove perceptual synchronization or crop quality.
+- The current collector independently parsed both raw logs and verified every
+  timing total, output geometry/frame rate/frame count and actual CPU devices.
+
+There is **no CUDA GPU in this development environment**. No new GPU fault
+mechanism was identified in review, but real T4 execution remains unverified.
+The README provides a 60-frame GPU smoke followed by four controlled benchmark
+variants. It rejects actual CPU/NVENC/failure fallback when CUDA/NVENC is requested
+and labels an uncalled lazy model `not_exercised` instead of claiming GPU success.
 
 ## Current optimization scope
 

@@ -30,12 +30,14 @@ class SyntheticYOLO:
         self.calls = []
         self.index = 0
         self.offset = 0.
+        self.box_fractions = (.28, .17, .69, .83)
 
     def track(self, source, **kwargs):
         self.calls.append(self.index)
         height, width = source.shape[:2]
-        data = np.array([[.28 * width + self.offset, .17 * height,
-                          .69 * width + self.offset, .83 * height, .95, 0]], np.float32)
+        x1, y1, x2, y2 = self.box_fractions
+        data = np.array([[x1 * width + self.offset, y1 * height,
+                          x2 * width + self.offset, y2 * height, .95, 0]], np.float32)
         tracked = self.tracker.update(Boxes(data, source.shape[:2]), img=source)
         boxes = tracked[:, :-1] if len(tracked) else np.empty((0, 6), np.float32)
         masks = np.zeros((len(boxes), height, width), np.float32)
@@ -95,6 +97,22 @@ class AdaptiveSegmentationTests(unittest.TestCase):
         self.assertTrue(np.all(gaps <= 3))
         self.assertEqual(len({track.track_id for _, track in self.history}), 1)
         self.assertTrue(any(track.source == "predicted" for _, track in self.history))
+
+    def test_last_decision_matches_real_calls_and_reset_clears_it(self):
+        decisions = []
+        for _ in range(45):
+            before = len(self.fake.calls)
+            self.step()
+            decision = self.tracker.last_decision
+            self.assertEqual(decision["frame_index"], self.index)
+            self.assertEqual(decision["detected"], len(self.fake.calls) > before)
+            self.assertEqual(decision["reason"] is not None, decision["detected"])
+            self.assertIn(decision["interval"], (1, 2, 3))
+            decisions.append(decision)
+        self.assertEqual(sum(d["detected"] for d in decisions), len(self.fake.calls))
+        self.assertTrue(any(not d["detected"] for d in decisions))
+        self.tracker.reset()
+        self.assertIsNone(self.tracker.last_decision)
 
     def test_skip_advances_real_tracker_without_empty_detection_update(self):
         last_measured = None

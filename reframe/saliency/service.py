@@ -8,6 +8,7 @@ from reframe.contracts import FrameObservations, SaliencyResult
 from reframe.saliency.base import SaliencyBackend
 from reframe.saliency.cache import SaliencyCache
 from reframe.saliency.scheduler import FixedIntervalScheduler
+from reframe.timing import HostTimings, timed_method
 
 
 class SaliencyService:
@@ -19,6 +20,8 @@ class SaliencyService:
         self.cache = SaliencyCache(ema)
         self.total_frames = self.refreshes = self.propagated = 0
         self._loaded = False
+        self._timings = HostTimings(("preparation", "observe", "selection_cache",
+                                    "cheap", "deepgaze", "bookkeeping"))
         self.reset()
 
     def reset(self) -> None:
@@ -26,6 +29,7 @@ class SaliencyService:
         self.scheduler.reset()
         self.backend.reset()
 
+    @timed_method("selection_cache")
     def process(self, frame: np.ndarray, observations: FrameObservations) -> SaliencyResult:
         context = observations.frame
         h, w = frame.shape[:2]
@@ -38,19 +42,23 @@ class SaliencyService:
             or context.frame_index <= previous.frame.frame_index
         ):
             self.reset()
-        scale = min(1.0, self.max_side / max(h, w))
-        small = cv2.resize(frame, (max(32, round(w * scale)), max(32, round(h * scale))),
-                           interpolation=cv2.INTER_AREA)
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        with self._timings.measure("preparation"):
+            scale = min(1.0, self.max_side / max(h, w))
+            small = cv2.resize(frame, (max(32, round(w * scale)), max(32, round(h * scale))),
+                               interpolation=cv2.INTER_AREA)
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         if not self._loaded:
-            self.backend.load()
+            with self._timings.measure("deepgaze"):
+                self.backend.load()
             self._loaded = True
         # Temporal backends must ingest even when their predictions are skipped.
-        self.backend.observe(small, context)
+        with self._timings.measure("observe"):
+            self.backend.observe(small, context)
         self.total_frames += 1
         propagated = self.cache.propagate(gray)
         if self.scheduler.should_refresh(observations, missing=self.cache.result is None):
-            prediction = self.backend.predict(small, context)
+            with self._timings.measure("deepgaze"):
+                prediction = self.backend.predict(small, context)
             result = self.cache.refresh(prediction, context, propagated, gray.shape)
             self.refreshes += 1
         else:
@@ -70,7 +78,10 @@ class SaliencyService:
     def telemetry(self) -> dict[str, Any]:
         result = dict(self.backend.telemetry())
         result.update(sample_frames_total=self.total_frames, sample_refreshes=self.refreshes,
-                      sample_propagated=self.propagated, sample_interval=self.scheduler.interval)
+                      sample_propagated=self.propagated, sample_interval=self.scheduler.interval,
+                      timing_seconds=dict(self._timings.seconds),
+                      total_seconds=self._timings.total,
+                      timing_kind="exclusive_host_wall")
         cached = self.cache.result
         if cached is not None:
             result.update(active_backend=cached.backend, map_source=cached.source,

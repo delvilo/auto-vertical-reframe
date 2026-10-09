@@ -10,6 +10,7 @@ from reframe.runtime import torch
 from reframe.contracts import BackendPrediction, FrameContext
 from reframe.saliency.base import SaliencyBackend
 from reframe.saliency.backends.handcrafted import HandcraftedSaliencyHelper
+from reframe.timing import HostTimings, timed_method
 
 
 class DeepGazeMRSaliencyHelper(SaliencyBackend):
@@ -43,6 +44,8 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         self.model_loaded = False
         self.consecutive_failures = 0
         self.max_failures = 3
+        self._timings = HostTimings(("init", "observe", "preprocess", "transfer",
+                                    "forward", "postprocess", "fallback", "bookkeeping"))
 
     def _resolve_device(self, device: str) -> str:
         if device != "auto":
@@ -65,6 +68,7 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
             return "mps"
         return "cpu"
 
+    @timed_method("init")
     def _load_model(self) -> bool:
         if self._disabled:
             return False
@@ -160,6 +164,7 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         return np.ascontiguousarray(np.transpose(rgb, (2, 0, 1)))
 
+    @timed_method("observe")
     def observe_frame(self, frame_bgr: np.ndarray) -> None:
         """Keep a small CPU-only window without loading or touching the model.
 
@@ -182,6 +187,7 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         except Exception as exc:
             self._inference_failure(exc)
 
+    @timed_method("transfer")
     def _sync_device_window(self) -> None:
         """Upload only unseen slots; a long pause uploads the latest full window."""
         if self.cpu_ring is None:
@@ -205,8 +211,9 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
             i = (self.ring_pos - pending + offset) % 16
             if self.copy_events[i] is not None:
                 self.copy_events[i].synchronize()
-            chw = self._preprocess_frame(self.cpu_ring[i])
-            self.host_ring[i].copy_(torch.from_numpy(chw))
+            with self._timings.measure("preprocess"):
+                chw = self._preprocess_frame(self.cpu_ring[i])
+                self.host_ring[i].copy_(torch.from_numpy(chw))
             self.tensor_ring[i].copy_(self.host_ring[i], non_blocking=cuda)
             self.tensor_ring[i + 16].copy_(self.tensor_ring[i])
             if cuda:
@@ -224,6 +231,11 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         else:
             logging.warning("DeepGaze frame fallback: %s", exc, exc_info=True)
 
+    @timed_method("fallback")
+    def _fallback_map(self, frame_bgr: np.ndarray) -> np.ndarray:
+        return self.fallback.compute_map(frame_bgr)
+
+    @timed_method("bookkeeping")
     def compute_map(self, frame_bgr: np.ndarray, ingest: bool = True) -> np.ndarray:
         self.frames_total += 1
         if ingest:
@@ -236,24 +248,28 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         ):
             self.active_backend = "handcrafted"
             self.frames_fallback += 1
-            return self.fallback.compute_map(frame_bgr)
+            return self._fallback_map(frame_bgr)
         try:
             self._sync_device_window()
-            clip = self.tensor_ring[self.ring_pos : self.ring_pos + 16]
-            amp = (
-                torch.autocast(device_type="cuda", dtype=torch.float16)
-                if self.use_amp and self.device_name.startswith("cuda")
-                else nullcontext()
-            )
-            with torch.inference_mode(), amp:
-                self.actual_forward_calls += 1
-                prediction = self.model(clip)
-            saliency = np.squeeze(prediction.detach().float().cpu().numpy())
-            if saliency.ndim != 2 or not np.isfinite(saliency).all():
-                raise ValueError("DeepGaze returned invalid saliency values")
-            saliency = np.exp(saliency - saliency.max())
-            saliency = cv2.normalize(saliency, None, 0.0, 1.0, cv2.NORM_MINMAX)
-            result = cv2.resize(saliency, (frame_bgr.shape[1], frame_bgr.shape[0]))
+            with self._timings.measure("forward"):
+                clip = self.tensor_ring[self.ring_pos : self.ring_pos + 16]
+                amp = (
+                    torch.autocast(device_type="cuda", dtype=torch.float16)
+                    if self.use_amp and self.device_name.startswith("cuda")
+                    else nullcontext()
+                )
+                with torch.inference_mode(), amp:
+                    self.actual_forward_calls += 1
+                    prediction = self.model(clip)
+            with self._timings.measure("postprocess"):
+                # The existing .cpu() can wait for CUDA. Without introducing a
+                # synchronize, forward is host dispatch and that wait is here.
+                saliency = np.squeeze(prediction.detach().float().cpu().numpy())
+                if saliency.ndim != 2 or not np.isfinite(saliency).all():
+                    raise ValueError("DeepGaze returned invalid saliency values")
+                saliency = np.exp(saliency - saliency.max())
+                saliency = cv2.normalize(saliency, None, 0.0, 1.0, cv2.NORM_MINMAX)
+                result = cv2.resize(saliency, (frame_bgr.shape[1], frame_bgr.shape[0]))
             self.active_backend = "deepgazemr"
             self.frames_backend += 1
             self.consecutive_failures = 0
@@ -265,7 +281,7 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
             self._inference_failure(exc)
             self.active_backend = "handcrafted"
             self.frames_fallback += 1
-            return self.fallback.compute_map(frame_bgr)
+            return self._fallback_map(frame_bgr)
 
     def reset_temporal_state(self) -> None:
         self.ring_pos = self.ring_count = 0
@@ -288,6 +304,9 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
             "temporal_window_frames": self.ring_count,
             "required_window_frames": 16,
             "amp_enabled": self.use_amp,
+            "deepgaze_timing_seconds": dict(self._timings.seconds),
+            "deepgaze_total_seconds": self._timings.total,
+            "deepgaze_timing_kind": "exclusive_host_wall",
         }
 
     def load(self) -> None:
@@ -296,6 +315,7 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
     def observe(self, frame: np.ndarray, context: FrameContext) -> None:
         self.observe_frame(frame)
 
+    @timed_method("bookkeeping")
     def predict(self, frame: np.ndarray, context: FrameContext) -> BackendPrediction:
         previous = self.frames_backend
         saliency = self.compute_map(frame, ingest=False).astype(np.float32, copy=False)

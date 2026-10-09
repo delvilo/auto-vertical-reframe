@@ -56,6 +56,7 @@ class AppConfig:
     diagnose_env: bool = False
     native_debug: bool = False
     max_frames: int | None = None
+    stats_interval: float = 0.0
     precrop: str | None = None
     device: str = 'auto'
     seg_model: str = 'yolo26n-seg.pt'
@@ -63,6 +64,8 @@ class AppConfig:
     seg_max_gap: int = 3
     seg_max_age: float = 0.1
     seg_thumbnail_mode: str = 'lazy'
+    seg_thumbnail_method: str = 'gray-area'
+    seg_skip_policy: str = 'primary'
     conf: float = 0.3
     preset: str = 'talking_head'
     classes: list[str] | None = None
@@ -150,12 +153,20 @@ def validate_config(args: AppConfig) -> None:
         raise ValueError("pose-model requires a COCO-17 YOLO .pt checkpoint")
     if args.max_frames is not None and args.max_frames < 1:
         raise ValueError("max-frames must be >= 1")
+    if (isinstance(args.stats_interval, bool)
+            or not isinstance(args.stats_interval, (int, float))
+            or not math.isfinite(args.stats_interval) or args.stats_interval < 0):
+        raise ValueError("stats-interval must be finite and nonnegative (video seconds); 0 disables it")
     if args.precrop not in {None, "middle", "left", "right"}:
         raise ValueError("precrop must be middle, left, right, or omitted for the full frame")
     if isinstance(args.seg_max_gap, bool) or not isinstance(args.seg_max_gap, int) or args.seg_max_gap < 1:
         raise ValueError("seg-max-gap must be an integer >= 1; 1 runs segmentation every frame")
     if args.seg_thumbnail_mode not in {"lazy", "eager"}:
         raise ValueError("seg-thumbnail-mode must be lazy or eager")
+    if args.seg_thumbnail_method not in {"gray-area", "bgr-area"}:
+        raise ValueError("seg-thumbnail-method must be gray-area or bgr-area")
+    if args.seg_skip_policy not in {"primary", "all"}:
+        raise ValueError("seg-skip-policy must be primary or all")
     if (
         isinstance(args.seg_max_age, bool)
         or not isinstance(args.seg_max_age, (int, float))

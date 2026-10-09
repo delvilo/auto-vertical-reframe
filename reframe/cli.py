@@ -27,6 +27,9 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
                         help="Enable PyTorch C++ tracebacks and Python fault diagnostics; keep stderr visible")
     parser.add_argument("--max-frames", type=int,
                         help="Process only the first N frames for a short diagnostic render")
+    parser.add_argument("--stats-interval", type=float,
+                        help="Emit Segment JSON every N video seconds and at scene cuts; "
+                             "0 disables it (default). Does not reset tracking or caches.")
     parser.add_argument("--precrop", choices=["middle", "left", "right"],
                         help="Infer on the middle, left, or right half-width at full height; "
                              "omit to infer on the full frame. Output still crops the full source.")
@@ -38,6 +41,12 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument("--seg-thumbnail-mode", choices=("lazy", "eager"),
                         help="Build tracking thumbnails on demand (lazy, default), or every "
                              "adaptive frame (eager, timing comparison)")
+    parser.add_argument("--seg-thumbnail-method", choices=("gray-area", "bgr-area"),
+                        help="Convert to grayscale before area resizing (gray-area, default), "
+                             "or resize BGR first (bgr-area, reference)")
+    parser.add_argument("--seg-skip-policy", choices=("primary", "all"),
+                        help="Permit skipping with distant lost secondary tracks when a primary "
+                             "is established (primary, default), or require every track settled (all)")
     parser.add_argument("--seg-max-gap", type=int,
                         help="Maximum adaptive YOLO segmentation interval in source frames (default: 3); "
                              "1 runs segmentation every frame")
