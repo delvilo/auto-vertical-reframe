@@ -132,6 +132,7 @@ editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程�
 | --- | --- |
 | `--seg-max-gap` | `3`；兩次 YOLO 分割間隔的來源幀數上限，正整數。`1` 關閉跳幀，提供逐幀比較基準 |
 | `--seg-max-age` | `0.1`；距上次真實分割的影片時間上限（秒），必須是有限正數；與幀數上限一起生效 |
+| `--seg-thumbnail-mode` | `lazy`；確定需要畫面判斷或光流時才建立縮圖。`eager` 保留原先每幀縮圖方式，供同版本對照 |
 
 例如 60 fps 下，最大 3 幀約為 0.05 秒；較低 FPS 時，0.1 秒上限可能使實際間隔縮短。
 開場及不穩定片段維持逐幀偵測，間隔上限不是固定每三幀才允許偵測。
@@ -144,6 +145,13 @@ Saliency 三級策略、DeepGaze 的 16 幀 CPU ring、相機平滑及編碼仍�
 `--precrop` 的推論範圍與原圖輸出定義不變；`--post-restore` 仍預設關閉。
 光流也有成本，追蹤變差還可能增加 Pose／DeepGaze 呼叫，因此要比較整體耗時與構圖品質，
 不能將省下的 YOLO 呼叫比例當成整體加速倍率。
+
+`lazy` 先檢查既有的「沒有追蹤目標、已要求刷新、不支援的 tracker、追蹤未穩定」條件；
+已確定要跑 YOLO 的影格可延後縮圖。後續畫面變化、信心、偵測年齡與間隔判斷維持原順序。
+需要畫面比較或光流時，才補建恰好相鄰的 N−1 與 N 幀縮圖；已建立的縮圖直接重用，
+每幀最多建立一次，切鏡、重置及結束會清除快取。仍使用長邊 320 的 `INTER_AREA`，先縮小再轉灰階。
+此方式保留上一幀原始影像的唯讀參照；半幅 precrop 是 view，可能暫時持有整張 4K BGR 影像，
+約增加 25 MB 主機記憶體。實際節省張數需扣除補建上一幀縮圖的次數。
 
 ### 方案 C：三級自動構圖與按需 DeepGaze MR
 
@@ -248,39 +256,92 @@ Summary 保留 `frames_with_head_cues`、`frames_with_pose`、`pose_rois_inferre
 頭腳裁切、主角遺失、鏡頭抖動與音畫同步。確認短片後，移除 `--max-frames 90`
 並更換輸出檔名處理完整影片。驗證範圍見 [MR_VALIDATION.md](MR_VALIDATION.md)。
 
-### Colab T4：動態分割與逐幀基準比較
+### Colab T4：縮圖成本與偵測間隔比較
 
-在同一個 Colab session、同一目錄與同一段影片執行以下 cell。
-兩種設定只改 `--seg-max-gap`；其餘模型、精度、precrop 與編碼參數相同。
-第一輪填入權重快取，第二輪比較至少 600 幀（若來源較短則處理至片尾）；不要清除
-YOLO 權重或 Torch Hub 快取。這是**已快取權重的獨立程序比較**，每個程序仍包含模型
-初始化；首次觸發 L3 的下載／載入耗時需另外辨識，並同時看分階段耗時。
+先前上傳的 600 幀 T4 測試中，gap 3 僅省 13 次 YOLO，第二輪耗時反而比 gap 1 多
+11.4%。新版提供 `lazy` 與 `eager` 同版本對照，用細分計時確認縮圖／排程成本。
+`eager` 保留先前每幀建立縮圖的行為；其他偵測條件、模型與精度設定相同。
 
-```bash
-%%bash
-set -euo pipefail
-for run in 1 2; do
-  for gap in 1 3; do
-    python3 -u -m reframe \
-      'vv110.mp4' "vv110V_seg_gap${gap}_run${run}.mp4" \
-      --seg-model yolo26n-seg.pt --pose-model yolo26n-pose.pt --device 0 \
-      --precrop middle --lock-first-subject --dead-zone 0.15 \
-      --seg-max-gap "$gap" --seg-max-age 0.1 \
-      --video-encoder hevc_nvenc --max-frames 600 \
-      --saliency-device cuda --saliency-trust-repo \
-      --saliency-max-side 384 --saliency-interval 3 --no-saliency-amp \
-      --native-debug --log-level DEBUG --ffmpeg-log-level info \
-      2>&1 | tee "/content/reframe-seg-gap${gap}-run${run}.log"
-  done
-done
+在已安裝專案並掛載 Drive 的 Colab 執行以下 Python cell。使用 Python 3.13+；
+`git pull --ff-only` 更新目前 checkout，測試不重新安裝 PyTorch，也不清除權重快取。
+
+```python
+from datetime import datetime, timezone
+from pathlib import Path
+import subprocess, sys
+
+assert sys.version_info >= (3, 13), "需要 Python 3.13+"
+repo = Path("/content/auto-vertical-reframe")
+video = Path("/content/drive/MyDrive/video/1080p/crop/vv110.mp4")
+run_dir = Path("/content") / ("reframe-benchmark-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
+subprocess.run(["git", "pull", "--ff-only"], cwd=repo, check=True)
+
+def checkpoint(name):
+    return str(next((p for p in (video.parent / name, repo / name) if p.is_file()), Path(name)))
+
+subprocess.run([
+    sys.executable, "-u", str(repo / "scripts/benchmark_colab.py"),
+    "--input", str(video), "--output-dir", str(run_dir),
+    "--max-frames", "600", "--repeats", "2",
+    "--seg-model", checkpoint("yolo26n-seg.pt"),
+    "--pose-model", checkpoint("yolo26n-pose.pt"),
+    "--device", "0", "--saliency-device", "cuda", "--video-encoder", "hevc_nvenc",
+], cwd=repo, check=True)
+print("測試資料：", run_dir)
 ```
 
-比較第二輪的總處理時間與 `stage_wall_seconds.segmentation`（含光流與排程）。
-Summary 的 `seg_detector_calls`、`seg_predicted_frames`、`seg_flow_seconds`、
-`seg_refresh_reasons`、`seg_max_prediction_age_seconds` 記錄真實呼叫數、預測幀數、
-光流耗時、刷新原因與預測資料的最長年齡。同時檢查 Pose／DeepGaze 呼叫有沒有增加、主角 ID 是否切換，
-並確認輸出幀數、FPS、頭腳裁切、鏡頭穩定與音畫同步。這組指令提供可重複的比較方式，
-T4 的實際加速倍率仍需在相同影片上量測。
+收集器比較 `gap1-lazy`（逐幀基準）、`gap3-eager`（原縮圖方式）、`gap3-lazy`（延遲縮圖）。
+每組先暖機一次，再量測兩輪並反轉順序，共 **9 次程序**；每次最多 600 幀。
+若每次仍需約兩分鐘，整組約需 18 分鐘。每次獨立程序仍含模型初始化；暖機結果保留但
+不納入中位數。預設使用 middle、鎖定首位主角、conf=0.3、dead-zone=0.06、FP32 saliency
+及關閉 post-restore，與上傳的四份 log 設定相同。
+
+原始 stdout/stderr 同時保留在終端與 `.log`；錯誤會保存已完成的資料並以非零狀態停止。
+輸出目錄必須不存在，以避免混入先前結果。程式另保存：
+
+- `results.json`：全部 Summary、實際命令、環境／Git 資訊、ffprobe 結果與失敗原因。
+- `results.csv`：逐次攤平的計時、計數與輸出驗證資料。
+- `aggregates.csv`：排除暖機與失敗執行後，各組數值的中位數。
+- 各組 MP4 與原始 log：ffprobe 檢查實際影格數、FPS、尺寸與音訊是否存在；記錄音畫時間戳，
+  視覺構圖與感知音畫同步仍需人工檢查。
+
+執行完成後，用第二個 cell 顯示主要數據，並打包 log／JSON／CSV 下載（影片保留於 run_dir）：
+
+```python
+import pandas as pd
+from zipfile import ZipFile, ZIP_DEFLATED
+from google.colab import files
+
+df = pd.read_csv(run_dir / "aggregates.csv")
+columns = ["case", "measured_runs", "median.summary.elapsed_seconds",
+           "median.summary.stage_wall_seconds.segmentation",
+           "median.summary.seg_timing_seconds.thumbnail",
+           "median.summary.seg_timing_seconds.scheduler",
+           "median.summary.seg_timing_seconds.model_track",
+           "median.summary.seg_timing_seconds.parse_masks",
+           "median.summary.seg_thumbnail_builds",
+           "median.summary.seg_detector_calls", "median.summary.seg_predicted_frames"]
+display(df[[c for c in columns if c in df.columns]])
+archive = run_dir.with_suffix(".zip")
+with ZipFile(archive, "w", ZIP_DEFLATED) as bundle:
+    for path in sorted(run_dir.iterdir()):
+        if path.suffix in {".log", ".json", ".csv"}:
+            bundle.write(path, path.name)
+files.download(str(archive))
+```
+
+`seg_timing_seconds` 的互斥分項為 `thumbnail`、`scheduler`、`frame_change`、`model_track`、
+`parse_masks`、`flow`、`predict`、`bookkeeping`，總和應等於 `seg_total_seconds`。
+它們是主機 wall time，沒有增加逐幀 CUDA 強制同步；`model_track` 含 YOLO 前後處理與
+ByteTrack，`parse_masks` 可能包含 GPU→CPU 等待，不能解讀成各模型的純 GPU kernel 時間。
+`scheduler` 只計入 `track()` 內的排程與穩定度更新；姿態後的 feedback 維持計入 saliency 階段。
+`seg_flow_seconds` 保留為 `flow` 分項的相同值，不能再加總一次。
+
+`seg_thumbnail_builds` 是實際縮圖張數；`seg_thumbnail_backfills` 是其中補建上一幀的張數；
+`seg_thumbnail_cache_hits` 是重用上一幀灰階的次數；`seg_thumbnail_deferred_frames` 表示
+當下沒有建立本幀縮圖，之後可能補建，並非最終省下的張數。`seg_flow_attempts` 含失敗的光流嘗試。
+比較 eager／lazy 的 YOLO 呼叫、刷新原因、Pose／DeepGaze 次數及輸出品質，再確認縮圖與整體耗時
+是否下降；新版的 T4 收益仍需用此測試實測。
 
 ## Architecture
 

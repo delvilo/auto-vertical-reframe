@@ -35,6 +35,9 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
 
     parser.add_argument("--seg-model")
     parser.add_argument("--tracker")
+    parser.add_argument("--seg-thumbnail-mode", choices=("lazy", "eager"),
+                        help="Build tracking thumbnails on demand (lazy, default), or every "
+                             "adaptive frame (eager, timing comparison)")
     parser.add_argument("--seg-max-gap", type=int,
                         help="Maximum adaptive YOLO segmentation interval in source frames (default: 3); "
                              "1 runs segmentation every frame")

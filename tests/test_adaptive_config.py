@@ -12,6 +12,7 @@ class AdaptiveConfigTests(unittest.TestCase):
         args = parse_args(["input.mp4", "output.mp4"])
         self.assertEqual(args.seg_max_gap, 3)
         self.assertEqual(args.seg_max_age, 0.1)
+        self.assertEqual(args.seg_thumbnail_mode, "lazy")
         self.assertFalse(args.post_restore)
 
     def test_baseline_and_precrop_are_independent(self):
@@ -52,6 +53,12 @@ class AdaptiveConfigTests(unittest.TestCase):
     def test_direct_config_accepts_positive_values(self):
         validate_config(AppConfig(input="in.mp4", output="out.mp4", seg_max_gap=1, seg_max_age=1))
         validate_config(AppConfig(input="in.mp4", output="out.mp4", seg_max_gap=6, seg_max_age=0.1))
+
+    def test_thumbnail_reference_mode_and_validation(self):
+        args = parse_args(["in.mp4", "out.mp4", "--seg-thumbnail-mode", "eager"])
+        self.assertEqual(args.seg_thumbnail_mode, "eager")
+        with self.assertRaisesRegex(ValueError, "seg-thumbnail-mode"):
+            validate_config(AppConfig(input="in.mp4", output="out.mp4", seg_thumbnail_mode="fast"))
 
 
 if __name__ == "__main__":

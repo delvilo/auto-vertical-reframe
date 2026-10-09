@@ -62,6 +62,7 @@ class AppConfig:
     tracker: str = 'bytetrack.yaml'
     seg_max_gap: int = 3
     seg_max_age: float = 0.1
+    seg_thumbnail_mode: str = 'lazy'
     conf: float = 0.3
     preset: str = 'talking_head'
     classes: list[str] | None = None
@@ -153,6 +154,8 @@ def validate_config(args: AppConfig) -> None:
         raise ValueError("precrop must be middle, left, right, or omitted for the full frame")
     if isinstance(args.seg_max_gap, bool) or not isinstance(args.seg_max_gap, int) or args.seg_max_gap < 1:
         raise ValueError("seg-max-gap must be an integer >= 1; 1 runs segmentation every frame")
+    if args.seg_thumbnail_mode not in {"lazy", "eager"}:
+        raise ValueError("seg-thumbnail-mode must be lazy or eager")
     if (
         isinstance(args.seg_max_age, bool)
         or not isinstance(args.seg_max_age, (int, float))

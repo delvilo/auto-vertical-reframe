@@ -132,13 +132,16 @@ class SegmentationTracker:
         self.motion = SparseMotion()
         self._counts = Counter()
         self._reasons = Counter()
-        self._flow_seconds = 0.0
+        self._timings = dict.fromkeys(("thumbnail", "scheduler", "frame_change", "model_track",
+                                      "parse_masks", "flow", "predict", "bookkeeping"), 0.0)
+        self._total_seconds = 0.0
         self._max_age = 0.0
         self._max_interval = 1
         self._clear()
 
     def _clear(self):
         self._previous = None
+        self._previous_frame = None
         self._gray = None
         self._tracks = ()
         self._measured = ()
@@ -160,6 +163,28 @@ class SegmentationTracker:
         # BoT-SORT and custom trackers have other clocks (GMC/ReID, etc.).
         return trackers[0] if len(trackers) == 1 and type(trackers[0]) is BYTETracker else None
 
+    def _timed(self, phase, function, *args, **kwargs):
+        """Exclusive host wall time; GPU waits remain charged where they occur."""
+        started = time.perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            self._timings[phase] += time.perf_counter() - started
+
+    def _build_gray(self, frame):
+        gray = self._timed("thumbnail", self._thumbnail, frame)
+        self._counts["thumbnail_builds"] += 1
+        return gray
+
+    def _remember(self, frame, context, tracks, gray):
+        self._tracks, self._previous, self._gray = tracks, context, gray
+        # cap.read supplies a new immutable-to-us array per source frame. Retain
+        # one reference only when its thumbnail may need to be backfilled later.
+        # A precrop view can retain the full 4K backing array (~25 MB host RAM).
+        self._previous_frame = frame if gray is None and self.config.seg_max_gap > 1 else None
+        if self._previous_frame is not None:
+            self._counts["thumbnail_deferred_frames"] += 1
+
     @staticmethod
     def _thumbnail(frame):
         h, w = frame.shape[:2]
@@ -174,19 +199,23 @@ class SegmentationTracker:
         tiles = cv2.resize(delta, (8, 6), interpolation=cv2.INTER_AREA)
         return float(delta.mean()) > 18 or float(tiles.max()) > 35
 
-    def _refresh_reason(self, context, gray):
+    def _metadata_reason(self):
+        """Only the original pre-image gates may short-circuit thumbnail work."""
         if not self._tracks:
-            return "no_tracks"
+            return "no_tracks", None
         if self._force:
-            return self._force
+            return self._force, None
         native = self._native()
         if native is None:
-            return "unsupported_tracker"
+            return "unsupported_tracker", None
         if (native.lost_stracks or any(not t.is_activated for t in native.tracked_stracks)
                 or {t.track_id for t in native.tracked_stracks} != {t.track_id for t in self._tracks}):
-            return "unsettled_tracks"
-        if self._changed(gray):
-            return "frame_change"
+            return "unsettled_tracks", native
+        return None, native
+
+    def _refresh_reason(self, context, native):
+        # Keep these AFTER the image-change check. A frame change resets measured
+        # stability, whereas a scheduled/age refresh can preserve it.
         if any(t.confidence < .45 for t in self._tracks):
             return "low_confidence"
         age = context.timestamp - self._measured_context.timestamp
@@ -243,6 +272,18 @@ class SegmentationTracker:
         return tuple(output)
 
     def track(self, frame: np.ndarray, context: FrameContext | None = None) -> tuple[TrackObservation, ...]:
+        """Callers must not mutate a supplied frame before the following call."""
+        started = time.perf_counter()
+        before = sum(self._timings.values())
+        try:
+            return self._track(frame, context)
+        finally:
+            elapsed = time.perf_counter() - started
+            measured = sum(self._timings.values()) - before
+            self._timings["bookkeeping"] += max(0., elapsed - measured)
+            self._total_seconds += elapsed
+
+    def _track(self, frame, context):
         args = self.config
         if context is None:
             index = self._previous.frame_index + 1 if self._previous else 1
@@ -255,38 +296,54 @@ class SegmentationTracker:
                               or (context.width, context.height, context.scene_index)
                               != (self._previous.width, self._previous.height, self._previous.scene_index)):
             self.reset()
-        gray = self._thumbnail(frame) if args.seg_max_gap > 1 else None
+        gray = (self._build_gray(frame)
+                if args.seg_max_gap > 1 and args.seg_thumbnail_mode == "eager" else None)
         reason = "every_frame" if args.seg_max_gap == 1 else "initial"
         if args.seg_max_gap > 1 and self._previous:
-            reason = self._refresh_reason(context, gray)
+            reason, native = self._timed("scheduler", self._metadata_reason)
             if reason is None:
-                started = time.perf_counter()
-                proposals, reason = self.motion.estimate(self._gray, gray, self._tracks,
-                                                          context.width, context.height)
-                self._flow_seconds += time.perf_counter() - started
+                if self._gray is None:
+                    if self._previous_frame is None:
+                        # Defensive recovery if a caller enables adaptive mode
+                        # midstream. Never substitute a non-adjacent gray frame.
+                        reason = "missing_history"
+                    else:
+                        self._gray = self._build_gray(self._previous_frame)
+                        self._counts["thumbnail_backfills"] += 1
+                else:
+                    self._counts["thumbnail_cache_hits"] += 1
+                if reason is None:
+                    if gray is None:
+                        gray = self._build_gray(frame)
+                    reason = ("frame_change" if self._timed("frame_change", self._changed, gray)
+                              else self._timed("scheduler", self._refresh_reason, context, native))
+            if reason is None:
+                self._counts["flow_attempts"] += 1
+                proposals, reason = self._timed("flow", self.motion.estimate, self._gray, gray,
+                                               self._tracks, context.width, context.height)
                 if reason is None and any(v[2] < .7 for v in proposals.values()):
                     reason = "flow_low_quality"
                 if reason is None:
-                    tracks = self._predict(proposals)
+                    tracks = self._timed("predict", self._predict, proposals)
                     self._counts["predicted_frames"] += 1
                     self._max_age = max(self._max_age, context.timestamp - self._measured_context.timestamp)
-                    self._tracks, self._previous, self._gray = tracks, context, gray
+                    self._remember(frame, context, tracks, gray)
                     return tracks
         self._reasons[reason] += 1
         if reason not in {"scheduled", "age_limit", "every_frame"}:
             self._stable_since = None
             self._interval = 1
-        result = self.model.track(source=frame, persist=True, tracker=args.tracker,
-                                 classes=self.allowed_class_ids, conf=args.conf,
-                                 retina_masks=args.retina_masks, device=args.yolo_device,
-                                 verbose=False)[0]
+        result = self._timed("model_track", self.model.track, source=frame, persist=True,
+                             tracker=args.tracker, classes=self.allowed_class_ids, conf=args.conf,
+                             retina_masks=args.retina_masks, device=args.yolo_device, verbose=False)[0]
         if self.actual_device is None:
             self.actual_device = verify_yolo_device(self.model, args.yolo_device)
         tracks = tuple(replace(t, measured_at=context) for t in
-                       parse_tracks(result, frame.shape[:2], self.allowed_class_ids))
+                       self._timed("parse_masks", parse_tracks, result, frame.shape[:2],
+                                   self.allowed_class_ids))
         self._counts["detector_calls"] += 1
-        self._update_stability(tracks, context)
-        self._tracks, self._previous, self._gray = tracks, context, gray
+        self._timed("scheduler", self._update_stability, tracks, context)
+        self._remember(frame, context, tracks, gray)
         self._force = None
         return tracks
 
@@ -308,10 +365,19 @@ class SegmentationTracker:
     def telemetry(self) -> dict:
         return {"detector_calls": self._counts["detector_calls"],
                 "predicted_frames": self._counts["predicted_frames"],
-                "flow_seconds": self._flow_seconds,
+                "flow_seconds": self._timings["flow"],
+                "timing_seconds": dict(self._timings),
+                "total_seconds": self._total_seconds,
+                "thumbnail_mode": self.config.seg_thumbnail_mode,
+                "thumbnail_builds": self._counts["thumbnail_builds"],
+                "thumbnail_cache_hits": self._counts["thumbnail_cache_hits"],
+                "thumbnail_backfills": self._counts["thumbnail_backfills"],
+                "thumbnail_deferred_frames": self._counts["thumbnail_deferred_frames"],
+                "flow_attempts": self._counts["flow_attempts"],
                 "max_prediction_age_seconds": self._max_age,
                 "max_interval": self._max_interval,
                 "refresh_reasons": dict(self._reasons)}
 
     def close(self) -> None:
+        self._clear()
         self.model = None

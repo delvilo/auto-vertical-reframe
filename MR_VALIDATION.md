@@ -1,6 +1,6 @@
 # DeepGaze MR validation and cascade follow-up
 
-Date: 2026-10-08. Package version: 0.2.1.
+Updated: 2026-10-09 (Asia/Taipei). Package version: 0.2.1.
 
 ## Current optimization scope
 
@@ -39,6 +39,80 @@ resource cleanup, removed CLI options and default-disabled restoration. Colab
 runs should report actual model calls and tier reasons alongside overall/stage
 timing; compare stable people, overlap/occlusion, cuts and non-person footage.
 Keep cold model loading separate from warmed processing time.
+
+## Lazy tracking thumbnails and timing collection (2026-10-09)
+
+The four uploaded `reframe-seg-gap{1,3}-run{1,2}.log` files match all 29 Python
+module hashes at `6476628`. On their common 600-frame, 4K/60 fps, middle-precrop
+T4 input, the second (cached-weight) round showed a regression:
+
+| Measurement | gap 1 | gap 3 (original eager thumbnails) |
+| --- | ---: | ---: |
+| Total pipeline time | 117.139 s | 130.457 s |
+| Segmentation stage | 18.100 s | 32.111 s |
+| YOLO calls / predicted frames | 600 / 0 | 587 / 13 |
+| Sparse motion estimation | 0 | 0.063 s |
+| Pose ROI inferences / MR forwards | 328 / 135 | 328 / 135 |
+
+Both gap 3 runs made identical decisions. The extra 14.011 s in segmentation
+cannot be attributed to sparse flow itself. The first gap 1 run downloaded the
+Hub repository and VGG weights, so its 136.761 s is not a fair warm baseline.
+All four runs completed 600 output frames at 60 fps with HEVC NVENC and AAC,
+with equal subject/pose/tier counts. These logs do not establish visual equality.
+
+The new default `--seg-thumbnail-mode lazy` runs the original metadata-only
+refresh checks before building a thumbnail. The later image-change, confidence,
+age and scheduled-update ordering is preserved, as are thresholds and the
+320-pixel INTER_AREA resize. If required, frame N-1 is lazily reconstructed from
+one retained read-only source reference, never from an older gray image. Each
+frame is resized at most once. When a gray image exists, its raw reference is
+released; reset and close release both. Retaining a half-width crop view can keep
+its entire 4K BGR backing array alive (about 25 MB host RAM).
+
+`--seg-thumbnail-mode eager` retains the original every-frame thumbnail behavior
+with the same new instrumentation. It provides a same-version reference without
+changing detector, pose or saliency policies. The metadata gate reasons covered
+310 of the uploaded frames, but deferred images may later require backfilling;
+that count is not a promise of 310 saved resizes.
+
+Summary now includes exclusive host-wall buckets in `seg_timing_seconds`:
+`thumbnail`, `scheduler`, `frame_change`, `model_track`, `parse_masks`, `flow`,
+`predict` and `bookkeeping`. Their sum equals `seg_total_seconds`; the outer
+pipeline segmentation stage additionally includes call-boundary overhead.
+`scheduler` covers decisions/stability inside `track()`; existing post-pose
+feedback remains within the saliency stage. `parse_masks` can absorb GPU-to-CPU
+waiting, and `model_track` includes YOLO preprocessing/postprocessing and native
+tracking. No new per-frame CUDA synchronization is introduced. Existing
+`seg_flow_seconds` aliases the flow bucket and must not be added again.
+
+Thumbnail builds, cache hits, prior-frame backfills, current-frame deferrals and
+flow attempts are counted separately. Deferrals are not permanently saved
+resizes. These counters and timings determine whether avoiding thumbnail work
+actually pays off on T4; a new speedup has not yet been measured there.
+
+Python 3.13.5 verification passes **164 tests and 84 subtests**. New tests cover
+exact eager/lazy decisions and boxes across forced updates, scene and geometry
+changes; adjacent KLT inputs after deferred runs; single builds per frame;
+resource release; timing reconciliation; collector failure/exit-code handling;
+warmup exclusion; and actual frame/FPS/audio validation logic.
+
+`scripts/benchmark_colab.py` runs gap1-lazy, gap3-eager and gap3-lazy, one warmup
+each plus two measured rounds by default (nine processes). Measured order is
+reversed on alternate rounds. It keeps native logs, commands, environment and
+ffprobe metadata, all Summary values, flattened CSV and per-case medians.
+It rejects stale timing schemas, inconsistent timing totals, wrong frame/FPS
+counts, missing audio and unexpected encoder fallback, while preserving failed
+run evidence. Warmups are excluded from medians; independent model startup is
+still included in each process. See README for runnable Colab cells.
+
+A real-model CPU smoke run also completed all six invocations (three warmups
+and one measured repeat per case) using the existing 12-frame, 12 fps fixture,
+official YOLO26n segmentation/Pose weights and libx264. Every output retained
+12 frames, 12 fps and audio; JSON/CSV/medians and logs were generated and validated.
+Eager and lazy each built 12 thumbnails on this short stable fixture; it tests
+collector integration, not the expected savings on forced-detection sequences.
+Local evidence is under
+`/workspace/reframe-runtime/validation/thumbnail-collector-smoke-20261009/`.
 
 ## Adaptive segmentation verification (2026-10-08)
 
