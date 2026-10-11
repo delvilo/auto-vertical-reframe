@@ -25,7 +25,7 @@ torchvision 仍是 Ultralytics 的依賴；torchaudio 不是本專案依賴。
 | M1 | 只建立所需 VGG 特徵層；strict 載入 DeepGaze checkpoint 與 center bias | 完成，CPU 真實權重比對通過 |
 | M2／第一階段 | TorchCodec 可選解碼器、準確幀序、小容量緩衝、共用縮圖與傳輸診斷 | 完成，CPU 端到端通過；NVDEC 待 Colab |
 | M3／第二階段 | GPU 裁切／縮放與模型前處理；小尺寸 CPU 分析資料，FFmpeg 音訊輸出 | 完成，CPU 整合通過；CUDA 待 Colab |
-| M4 | Colab 分階段收集器、回歸紀錄與提交 | 待實作 |
+| M4 | Colab 分階段收集器、回歸紀錄與提交 | 完成，CPU 三組／續作／備份驗證通過 |
 
 每個里程碑獨立 commit；各次提交更新本檔。先以可選方式提供 GPU 路徑，T4 實測後再決定預設值。
 GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、全數尾幀及 precrop 座標定義。
@@ -60,4 +60,30 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
   此測試 saliency max-side=128、gap=3，只驗證功能，不能與先前不同設定比較速度。
   另測右側 precrop／debug／lossless 三幀輸出成功。獨立程式審查未找到阻擋問題。
   Summary 的 CUDA allocator peak 僅涵蓋 PyTorch、為程序生命期峰值，不含所有外部 NVDEC／NVENC 配置。
-- 接續工作：M4 Colab 收集器、notebook／說明與測試，完成後推送；T4 短測／完整影片視覺比較仍待使用者執行。
+- M4：新增 `notebooks/colab-torchcodec.ipynb`、`scripts/colab_torchcodec.py` 與
+  `docs/colab-torchcodec.md`。預設 baseline／stage1 各 180 幀一次，stage2 另啟用；
+  完整影片一次只跑一組，必須有同來源／模型／程式／環境／設定的成功短測。
+  相同成功紀錄與成片 SHA-256 驗證後才跳過；失敗保留 native log、Segment、traceback，從該組第一幀重跑。
+  三組一致使用 gray-area／primary 排程；只改解碼／影像處理路徑。保留 torchvision，不新增 torchaudio。
+  TorchCodec CUDA wheel 安裝採 `--no-deps --force-reinstall`，不替换既有 torch／torchvision。
+- 最終驗證：288 項測試執行，286 通過／2 個 CUDA 測試跳過；包含真實 DeepGaze checkpoint
+  與 pinned upstream 的逐元素相同比對。新增 notebook 七個 code cells 可編譯、未偽造執行輸出。
+  Colab 收集器在 CPU 跑 baseline／stage1／stage2，均為 90/90 幀、60 FPS；
+  影片 1.500 秒／音訊 1.493 秒。再次執行三組皆跳過，備份 results.json 與來源逐 byte 相同。
+  這組 collector 測試沒有觸發 DeepGaze，明確標成 not_exercised；M3 的另一組實測已有 4 次 forward。
+- 驗證檔案：`/workspace/reframe-runtime/validation/torchcodec-final-tests.log`、
+  `torchcodec-stage2.log`、`torchcodec-collector-cpu-20261012/`、`torchcodec-collector-resume-20261012.log`。
+  極短 12 幀測試暴露既有 FFmpeg AAC 音訊超尾；收集器確實拒絕，未放寬完整影片的音訊驗證。
+- 續作環境：已實際執行 `/workspace/reframe-runtime/setup-torchcodec-cloud.sh`，
+  pip check、CPU encoder 與 11 個 TorchCodec reader 測試通過；安裝及啟動指引已更新環境設定草稿。
+  草稿尚需在環境設定儲存並發布，才成為後續任務的設定；不影響目前程式與 Git 提交。
+- 下一步僅剩外部驗證：在 Colab T4 先跑 180 幀短測，再逐組跑長片，核對人物交錯、背面／手遮擋、
+  暗場與鏡頭轉動的視覺焦點。沒有 T4 實測前，不改預設值、不宣稱 GPU 加速比例或無 CUDA 問題。
+
+## 已建立的程式里程碑
+
+- `e785221`：M0 續作紀錄。
+- `0c9b154`：M1 精簡 DeepGaze checkpoint 載入。
+- `3b476df`：M2 可選 TorchCodec 解碼。
+- `51c45e0`：M3 tensor 模型輸入與輸出處理。
+- M4：含本次紀錄的 Colab 分階段測試提交（以 `git log` 查詢 SHA）。

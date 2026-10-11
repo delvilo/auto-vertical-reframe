@@ -24,7 +24,8 @@ Naive center-cropping loses the subject the moment they move. Manual reframing i
 - YOLO26n-pose COCO-17 keypoints with conservative head estimates and batched person ROIs.
 - Two-person framing mode when a second subject crosses a spatial threshold.
 - Stable subjects compose directly from pose and segmentation; uncertain scenes use lightweight saliency before DeepGaze MR.
-- DeepGaze MR loads only when needed and a full 16-frame CPU window is available; warmup and failures visibly use handcrafted output.
+- DeepGaze MR loads only its feature checkpoint when needed and a full 16-frame window is available; warmup and failures visibly use handcrafted output.
+- Optional staged TorchCodec decoding and tensor preprocessing, with explicit CPU fallback and transfer diagnostics.
 - Tier decisions, actual neural calls, cache age and backend/device state are reported in the final summary.
 - Subject lock, min/max zoom, max step-per-frame, and per-axis motion damping.
 - Post-processing via ffmpeg: configurable encoder, CRF, audio bitrate, and optional unsharp/denoise pass.
@@ -50,7 +51,7 @@ with the interpreter that will run the application:
 
 ```bash
 python3 -m pip install -e .
-auto_reframe.py input.mp4 output.mp4 --device auto --saliency-trust-repo
+auto_reframe.py input.mp4 output.mp4 --device auto
 ```
 
 `requirements.txt` pins Ultralytics to the version observed in the working Colab
@@ -63,6 +64,30 @@ A fresh GPU environment needs a matching CUDA-enabled PyTorch/torchvision instal
 後續開發以 **Python 3.13+** 為相容基準，套件 metadata 也設定 `requires-python >=3.13`。
 不要求支援 Python 3.12 或更舊版本；後續套件、CUDA build 與新 Python 版本仍需實測。
 這項基準記錄在 [AGENTS.md](AGENTS.md)，供以後的程式改動遵循。
+
+### TorchCodec：分兩階段啟用
+
+預設仍使用 OpenCV。TorchCodec 路徑需另裝與 PyTorch／CUDA 相符的 wheel，
+並提供 FFmpeg shared libraries；目前本機驗證為 Python 3.13.5、PyTorch 2.11.0+cpu、
+TorchCodec 0.17.0+cpu。T4／NVDEC 的正確性、速度與記憶體峰值須另行實測。
+
+```bash
+# 第一階段：NVDEC 解碼，模型與輸出維持 NumPy reference 路徑
+auto_reframe.py input.mp4 stage1.mp4 --device 0 --saliency-device cuda \
+  --video-decoder torchcodec --decode-device cuda:0 --decode-batch-size 4
+# 第二階段：另啟用 GPU precrop／YOLO 前處理、DeepGaze 小圖窗口、裁切與縮放
+auto_reframe.py input.mp4 stage2.mp4 --device 0 --saliency-device cuda \
+  --video-decoder torchcodec --decode-device cuda:0 --decode-batch-size 4 \
+  --frame-processing tensor
+```
+
+兩階段均保留 FFmpeg／NVENC 音訊合成與原始幀數、FPS；`precrop` 仍只限制推論區域。
+第二階段目前支援 PyTorch `.pt` YOLO 模型及 ByteTrack。CPU 僅取得分析小圖、追蹤資訊及最終輸出影像；
+`--save-debug-preview` 會額外下載完整原圖。GPU 色彩轉換與插值可能改變部分模型結果，需比較視覺焦點。
+變動幀率來源會明確拒絕，避免套用固定 FPS 後改變播放速度。
+
+請使用 [Colab 分階段測試說明](docs/colab-torchcodec.md) 先短測再測長片；
+[工作／續作紀錄](docs/torchcodec-progress.md) 記錄各階段驗證與尚待完成的 GPU 測試。
 
 ### Colab：從 MediaPipe 遷移
 
@@ -179,15 +204,20 @@ Saliency 三級策略、DeepGaze 的 16 幀 CPU ring、相機平滑及編碼仍�
 連續穩定後才降低層級，明顯變化會立即重新評估。L1 不會因為 DeepGaze 快取過期而
 強制執行神經模型，也不會把過期顯著圖加入主角評分。
 
-每幀的低解析度 BGR uint8 影像都加入 **16 幀 CPU ring**，包含 L1 與 L2。
+每幀的低解析度 uint8 影像都加入 **16 幀 ring**，包含 L1 與 L2；
+reference 路徑使用 CPU BGR，tensor 路徑保留解碼裝置上的小圖 RGB，不保留整批原始影片。
 只有 L3 且時序窗口完整時才載入 DeepGaze 模型、上傳必要影格至裝置並執行推論。
 載入後保留模型，後續只上傳新增影格；切鏡會清除舊時序與顯著圖，重新收集 16 幀。
 窗口不足時使用 L2 暖機；模型載入或推論失敗會保留 warning／traceback 並回退。
 首次 L3 的模型下載／載入延遲仍可能明顯，應與暖機後耗時分開比較。
+模型直接 strict 載入既有 DeepGaze checkpoint（約 76.6 MiB，已含 VGG 特徵層）與 center bias（約 7 MiB），
+不建立 VGG classifier、不另下載約 548 MiB 的完整 VGG19，也不執行遠端 Hub Python。
+權重來源固定 commit 並驗證 SHA-256；已存在的相同快取會重用。這主要降低冷啟動成本，
+不代表每次 DeepGaze forward 會變快。
 
 | 設定 | 行為 |
 | --- | --- |
-| `--saliency-trust-repo` | 允許首次需要 L3 時載入 `mtangemann/deepgazemr` Hub 程式碼 |
+| `--saliency-trust-repo` | 舊命令相容選項；新載入器不執行 Hub 程式碼，不需此參數 |
 | `--saliency-device` | `auto`；Colab 可指定 `cuda`，實際裝置以 Summary 為準 |
 | `--saliency-max-side` | `384`；限制顯著性縮圖長邊，保留既有縮放方式 |
 | `--saliency-interval` | `3`；需要顯著性時的基本更新間隔，實際呼叫由三級策略及快取決定 |
