@@ -156,7 +156,7 @@ class TorchCodecReader:
 
     def telemetry(self) -> dict[str, Any]:
         """Return JSON-serializable measurements, available after close()."""
-        return {
+        result = {
             "decoder": "torchcodec", "torchcodec_version": self._version,
             "seek_mode": "exact", "requested_device": self.device,
             "actual_device": self._actual_device,
@@ -174,6 +174,15 @@ class TorchCodecReader:
             "timestamp_tolerance_seconds": .001,
             "pixels": dict(self.pixel_metrics),
         }
+        if self._actual_device is not None and self._actual_device.startswith("cuda"):
+            import torch
+            result["cuda_allocator_peak"] = {
+                "device": self._actual_device,
+                "allocated_bytes": torch.cuda.max_memory_allocated(self._actual_device),
+                "reserved_bytes": torch.cuda.max_memory_reserved(self._actual_device),
+                "scope": "process_lifetime_pytorch_allocator_only",
+            }
+        return result
 
     def close(self) -> None:
         """Release reader-owned tensors and the decoder; safe to call twice."""

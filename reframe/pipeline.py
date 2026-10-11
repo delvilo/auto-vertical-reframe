@@ -277,7 +277,7 @@ def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
 
                 context = region.context(frame_idx, (frame_idx - 1) / fps, scene_index)
                 pipeline_timings.switch("segmentation")
-                if isinstance(inference_frame, TensorFrame):
+                if isinstance(inference_frame, TensorFrame) and args.frame_processing == "reference":
                     frame = frame.bgr()
                     inference_frame = region.crop(frame)
                 tracks = tracker.track(inference_frame, context)
@@ -527,21 +527,19 @@ def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
                     base_crop_w, base_crop_h, state.zoom, frame_w, frame_h
                 )
                 pipeline_timings.switch("render_write")
-                if isinstance(frame, TensorFrame):
+                if isinstance(frame, TensorFrame) and args.frame_processing == "reference":
                     frame = frame.bgr()
                 cropped, crop_rect = crop_frame(
                     frame, state.crop_center_x, state.crop_center_y, crop_w, crop_h
                 )
-                clean_out = cv2.resize(
-                    cropped,
-                    (args.output_width, args.output_height),
-                    interpolation=cv2.INTER_LINEAR,
-                )
+                clean_out = (cropped.resized_bgr(size, interpolation="bilinear")
+                             if isinstance(cropped, TensorFrame) else
+                             cv2.resize(cropped, size, interpolation=cv2.INTER_LINEAR))
                 writer.write(clean_out)
 
                 if debug_writer is not None:
                     dbg = draw_debug(
-                        frame=frame,
+                        frame=frame.bgr() if isinstance(frame, TensorFrame) else frame,
                         crop_rect=crop_rect,
                         candidates=candidates,
                         subject=subject,
@@ -621,7 +619,7 @@ def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
             summary = {
                 "source_fps": fps,
                 "source_total_frames": total_frames,
-                "video_io": ({**tensor_reader.telemetry(), "frame_processing": "reference",
+                "video_io": ({**tensor_reader.telemetry(), "frame_processing": args.frame_processing,
                               "pixel_metrics": dict(tensor_reader.pixel_metrics)}
                              if tensor_reader is not None else
                              {"decoder": "opencv", "actual_device": "cpu",

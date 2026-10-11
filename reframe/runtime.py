@@ -55,6 +55,8 @@ def log_runtime_info(args) -> None:
                  args.pose_model, args.yolo_device, args.video_encoder)
     logging.info("Saliency policy=auto_cascade (pose_only/handcrafted/deepgazemr); "
                  "precrop=%s; post_restore=%s", args.precrop or "full", args.post_restore)
+    logging.info("Decoder=%s decode_device=%s batch=%s frame_processing=%s",
+                 args.video_decoder, args.decode_device, args.decode_batch_size, args.frame_processing)
     if torch is not None:
         logging.info("PyTorch=%s CUDA build=%s CUDA available=%s",
                      torch.__version__, torch.version.cuda, torch.cuda.is_available())
@@ -84,7 +86,7 @@ def diagnose_environment(args) -> int:
     failed = False
     for key in ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "LD_PRELOAD"):
         logging.info("%s=%s", key, os.environ.get(key, "<unset>"))
-    for name in ("torch", "torchvision", "ultralytics", "scenedetect", "lap",
+    for name in ("torch", "torchvision", "torchcodec", "ultralytics", "scenedetect", "lap",
                  "numpy", "opencv-python", "opencv-contrib-python", "opencv-python-headless"):
         try:
             logging.info("Package %s=%s", name, importlib.metadata.version(name))

@@ -41,6 +41,9 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
                         help="TorchCodec device: cpu or cuda:N (default cuda:0); CUDA fallback is fatal")
     parser.add_argument("--decode-batch-size", type=int,
                         help="TorchCodec bounded decode batch, 1..8 source frames (default 4)")
+    parser.add_argument("--frame-processing", choices=("reference", "tensor"),
+                        help="Stage 1 keeps NumPy models/render (reference, default); "
+                             "stage 2 uses tensor model inputs and rendering (requires TorchCodec)")
 
     parser.add_argument("--seg-model")
     parser.add_argument("--tracker")
@@ -108,7 +111,7 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument(
         "--saliency-trust-repo",
         action="store_true",
-        help="Allow torch.hub to execute untrusted code from remote or local repo.",
+        help="Legacy compatibility flag; DeepGaze now loads verified data without executing Hub code.",
     )
 
     parser.add_argument("--speaker-aware-mode", action="store_true")

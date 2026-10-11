@@ -10,6 +10,7 @@ from reframe.config import AppConfig, CLASS_IDS
 from reframe.contracts import (CameraState, FrameContext, FrameObservations, TrackObservation,
                                PoseDetection, PoseObservation, PoseCues)
 from reframe.geometry import box_iou
+from reframe.frame_pixels import TensorFrame
 from reframe.runtime import verify_yolo_device
 
 def pose_owner(box, person_boxes) -> Optional[int]:
@@ -98,7 +99,7 @@ def pose_cues(keypoints, person_box, frame_shape, min_confidence) -> PoseCues | 
     }
 
 class YOLOPoseHelper:
-    """One persistent COCO-17 model, batched BGR ROIs, no separate face model."""
+    """One persistent COCO-17 model; batched BGR or RGB tensor ROIs."""
 
     def __init__(self, args: AppConfig):
         path = Path(args.pose_model)
@@ -135,16 +136,23 @@ class YOLOPoseHelper:
             right, bottom = min(width, math.ceil(x2 + px)), min(height, math.ceil(y2 + py))
             if left >= right or top >= bottom:
                 continue
-            image = np.ascontiguousarray(frame[top:bottom, left:right])
+            image = frame[top:bottom, left:right]
+            if not isinstance(image, TensorFrame):
+                image = np.ascontiguousarray(image)
             prepared.append((index, box, track_id, left, top, image))
-            logging.debug("Pose ROI track=%s x=%s y=%s width=%s height=%s BGR device=%s",
-                          track_id, left, top, right - left, bottom - top, self.device)
+            logging.debug("Pose ROI track=%s x=%s y=%s width=%s height=%s format=%s device=%s",
+                          track_id, left, top, right - left, bottom - top,
+                          "RGB tensor" if isinstance(image, TensorFrame) else "BGR", self.device)
         for start in range(0, len(prepared), self.batch_size):
             batch = prepared[start:start + self.batch_size]
             try:
+                predictor = {}
+                if isinstance(frame, TensorFrame):
+                    from reframe.perception.tensor_yolo import TensorPosePredictor, predictor_options
+                    predictor = predictor_options(self.model, TensorPosePredictor)
                 results = self.model.predict(source=[item[5] for item in batch],
                                              device=self.device, imgsz=self.imgsz,
-                                             conf=self.conf, verbose=False)
+                                             conf=self.conf, verbose=False, **predictor)
                 if self.actual_device is None:
                     self.actual_device = verify_yolo_device(self.model, self.device, "pose")
                 if len(results) != len(batch):

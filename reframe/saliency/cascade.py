@@ -20,6 +20,7 @@ from reframe.saliency.base import SaliencyBackend
 from reframe.saliency.backends.handcrafted import HandcraftedSaliencyHelper
 from reframe.saliency.cache import SaliencyCache
 from reframe.timing import HostTimings, timed_method
+from reframe.frame_pixels import TensorFrame
 
 
 class CascadeSaliencyService:
@@ -76,6 +77,8 @@ class CascadeSaliencyService:
         h, w = frame.shape[:2]
         scale = min(1.0, max_side / max(h, w))
         shape = (max(32, round(w * scale)), max(32, round(h * scale)))
+        if isinstance(frame, TensorFrame):
+            return frame.resized(shape)
         return frame if shape == (w, h) else cv2.resize(frame, shape, interpolation=cv2.INTER_AREA)
 
     @staticmethod
@@ -268,9 +271,11 @@ class CascadeSaliencyService:
         with self._timings.measure("preparation"):
             small = self._resize(frame, self.max_side)
             cheap_frame = self._resize(small, 160)
+            if isinstance(cheap_frame, TensorFrame):
+                cheap_frame = cheap_frame.bgr()
             gray = cv2.cvtColor(cheap_frame, cv2.COLOR_BGR2GRAY)
         with self._timings.measure("observe"):
-            # CPU-only temporal ingest; loading belongs to predict, at L3.
+            # Bounded uint8 temporal ingest; loading belongs to predict, at L3.
             self.deep_backend.observe(small, context)
             self.cheap_backend.observe(cheap_frame, context)
         self.total_frames += 1

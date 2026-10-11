@@ -61,6 +61,7 @@ class AppConfig:
     video_decoder: str = 'opencv'
     decode_device: str = 'cuda:0'
     decode_batch_size: int = 4
+    frame_processing: str = 'reference'
     device: str = 'auto'
     seg_model: str = 'yolo26n-seg.pt'
     tracker: str = 'bytetrack.yaml'
@@ -164,6 +165,10 @@ def validate_config(args: AppConfig) -> None:
         raise ValueError("precrop must be middle, left, right, or omitted for the full frame")
     if args.video_decoder not in {"opencv", "torchcodec"}:
         raise ValueError("video-decoder must be opencv or torchcodec")
+    if args.frame_processing not in {"reference", "tensor"}:
+        raise ValueError("frame-processing must be reference or tensor")
+    if args.frame_processing == "tensor" and args.video_decoder != "torchcodec":
+        raise ValueError("tensor frame-processing requires --video-decoder torchcodec")
     if not isinstance(args.decode_device, str) or (args.decode_device != "cpu" and not (
             args.decode_device == "cuda" or (args.decode_device.startswith("cuda:")
                                             and args.decode_device[5:].isascii()

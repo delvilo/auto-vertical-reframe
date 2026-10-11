@@ -11,6 +11,7 @@ import numpy as np
 from ultralytics import YOLO
 from reframe.config import AppConfig
 from reframe.contracts import FrameContext, FrameObservations, TrackObservation
+from reframe.frame_pixels import TensorFrame
 from reframe.perception.motion import SparseMotion
 from reframe.runtime import torch, verify_yolo_device
 
@@ -180,9 +181,9 @@ class SegmentationTracker:
 
     def _remember(self, frame, context, tracks, gray):
         self._tracks, self._previous, self._gray = tracks, context, gray
-        # cap.read supplies a new immutable-to-us array per source frame. Retain
-        # one reference only when its thumbnail may need to be backfilled later.
-        # A precrop view can retain the full 4K backing array (~25 MB host RAM).
+        # Decoder frames are immutable to us. Retain one reference only when its
+        # thumbnail may need to be backfilled later. A precrop view can retain
+        # the full source array or one bounded TorchCodec decode batch.
         self._previous_frame = frame if gray is None and self.config.seg_max_gap > 1 else None
         if self._previous_frame is not None:
             self._counts["thumbnail_deferred_frames"] += 1
@@ -191,6 +192,8 @@ class SegmentationTracker:
         h, w = frame.shape[:2]
         scale = min(1., 320 / max(h, w))
         size = (max(8, round(w * scale)), max(8, round(h * scale)))
+        if isinstance(frame, TensorFrame):
+            return frame.gray_thumbnail(size, method=self.config.seg_thumbnail_method)
         if self.config.seg_thumbnail_method == "bgr-area":
             small = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
             return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
@@ -439,9 +442,14 @@ class SegmentationTracker:
         if reason not in {"scheduled", "age_limit", "every_frame"}:
             self._stable_since = None
             self._interval = 1
+        predictor = {}
+        if isinstance(frame, TensorFrame):
+            from reframe.perception.tensor_yolo import TensorSegmentationPredictor, predictor_options
+            predictor = predictor_options(self.model, TensorSegmentationPredictor)
         result = self._timed("model_track", self.model.track, source=frame, persist=True,
                              tracker=args.tracker, classes=self.allowed_class_ids, conf=args.conf,
-                             retina_masks=args.retina_masks, device=args.yolo_device, verbose=False)[0]
+                             retina_masks=args.retina_masks, device=args.yolo_device, verbose=False,
+                             **predictor)[0]
         if self.actual_device is None:
             self.actual_device = verify_yolo_device(self.model, args.yolo_device)
         tracks = tuple(replace(t, measured_at=context) for t in

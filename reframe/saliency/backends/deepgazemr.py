@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 from reframe.runtime import torch
 from reframe.contracts import BackendPrediction, FrameContext
+from reframe.frame_pixels import TensorFrame
 from reframe.saliency.base import SaliencyBackend
 from reframe.saliency.backends.handcrafted import HandcraftedSaliencyHelper
 from reframe.saliency.backends.deepgaze_loader import load_deepgaze_mr
@@ -28,6 +29,9 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         self.trust_repo = trust_repo
         self.model = None
         self.tensor_ring = self.host_ring = self.cpu_ring = None
+        self.observation_tensor_ring = None
+        self.tensor_observed_frames = self.tensor_preprocessed_frames = 0
+        self.tensor_cross_device_copies = self.tensor_cross_device_bytes = 0
         self.copy_events = []
         self.ring_pos = self.ring_count = 0
         self._temporal_sequence = self._device_sequence = 0
@@ -103,14 +107,16 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
 
     def _resize_frame(
         self,
-        frame_bgr: np.ndarray,
-    ) -> np.ndarray:
+        frame_bgr: np.ndarray | TensorFrame,
+    ) -> np.ndarray | TensorFrame:
         frame_h, frame_w = frame_bgr.shape[:2]
         scale = min(1.0, self.max_side / max(frame_h, frame_w))
         resized_w = max(64, int(round(frame_w * scale)))
         resized_h = max(64, int(round(frame_h * scale)))
         if (resized_w, resized_h) == (frame_w, frame_h):
             return frame_bgr
+        if isinstance(frame_bgr, TensorFrame):
+            return frame_bgr.resized((resized_w, resized_h))
         return cv2.resize(
             frame_bgr,
             (resized_w, resized_h),
@@ -122,22 +128,50 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         return np.ascontiguousarray(np.transpose(rgb, (2, 0, 1)))
 
-    @timed_method("observe")
-    def observe_frame(self, frame_bgr: np.ndarray) -> None:
-        """Keep a small CPU-only window without loading or touching the model.
+    @staticmethod
+    def _preprocess_tensor_frame(rgb):
+        """Convert small RGB CHW uint8 pixels on the inference device."""
+        return rgb.to(dtype=torch.float32).div_(255.0)
 
-        Cheap tiers may observe indefinitely. GPU staging and RGB float conversion
-        happen only when a prediction actually needs the neural backend.
+    def _discard_device_window(self) -> None:
+        for event in self.copy_events:
+            if event is not None:
+                event.synchronize()
+        self.copy_events = []
+        self.tensor_ring = self.host_ring = None
+        self._device_sequence = 0
+
+    @timed_method("observe")
+    def observe_frame(self, frame_bgr: np.ndarray | TensorFrame) -> None:
+        """Keep a small uint8 window without loading or touching the model.
+
+        Tensor inputs stay on their source device; copying into this bounded
+        window releases references to decoder batches. Float conversion and the
+        model's device window remain deferred until a neural prediction.
         """
         self.observed_frames += 1
         self.last_observation_ok = False
         try:
             resized = self._resize_frame(frame_bgr)
-            if self.cpu_ring is None or self.cpu_ring.shape[1:] != resized.shape:
-                self.cpu_ring = np.empty((16, *resized.shape), dtype=np.uint8)
-                self.ring_pos = self.ring_count = 0
-                self._temporal_sequence = self._device_sequence = 0
-            self.cpu_ring[self.ring_pos] = resized
+            if isinstance(resized, TensorFrame):
+                rgb = resized.rgb
+                if (self.observation_tensor_ring is None
+                        or self.observation_tensor_ring.shape[1:] != rgb.shape
+                        or self.observation_tensor_ring.device != rgb.device):
+                    self._discard_device_window()
+                    self.observation_tensor_ring = torch.empty(
+                        (16, *rgb.shape), dtype=rgb.dtype, device=rgb.device)
+                    self.cpu_ring = None
+                    self.ring_pos = self.ring_count = self._temporal_sequence = 0
+                self.observation_tensor_ring[self.ring_pos].copy_(rgb)
+                self.tensor_observed_frames += 1
+            else:
+                if self.cpu_ring is None or self.cpu_ring.shape[1:] != resized.shape:
+                    self._discard_device_window()
+                    self.cpu_ring = np.empty((16, *resized.shape), dtype=np.uint8)
+                    self.observation_tensor_ring = None
+                    self.ring_pos = self.ring_count = self._temporal_sequence = 0
+                self.cpu_ring[self.ring_pos] = resized
             self.ring_pos = (self.ring_pos + 1) % 16
             self.ring_count = min(16, self.ring_count + 1)
             self._temporal_sequence += 1
@@ -148,6 +182,9 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
     @timed_method("transfer")
     def _sync_device_window(self) -> None:
         """Upload only unseen slots; a long pause uploads the latest full window."""
+        if self.observation_tensor_ring is not None:
+            self._sync_tensor_device_window()
+            return
         if self.cpu_ring is None:
             return
         shape = (3, *self.cpu_ring.shape[1:3])
@@ -180,6 +217,30 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
                 self.copy_events[i] = event
         self._device_sequence = self._temporal_sequence
 
+    def _sync_tensor_device_window(self) -> None:
+        source = self.observation_tensor_ring
+        shape = tuple(source.shape[1:])
+        if self.tensor_ring is None or tuple(self.tensor_ring.shape[1:]) != shape:
+            self._discard_device_window()
+            self.tensor_ring = torch.empty(
+                (32, *shape), device=self.device_name, dtype=torch.float32)
+        pending = min(16, self._temporal_sequence - self._device_sequence)
+        for offset in range(pending):
+            index = (self.ring_pos - pending + offset) % 16
+            pixels = source[index]
+            # A deliberately different saliency device copies only the small
+            # uint8 observation. Same-device CUDA processing never downloads it.
+            if pixels.device != self.tensor_ring.device:
+                self.tensor_cross_device_copies += 1
+                self.tensor_cross_device_bytes += pixels.numel() * pixels.element_size()
+                pixels = pixels.to(device=self.tensor_ring.device)
+            with self._timings.measure("preprocess"):
+                chw = self._preprocess_tensor_frame(pixels)
+                self.tensor_preprocessed_frames += 1
+            self.tensor_ring[index].copy_(chw)
+            self.tensor_ring[index + 16].copy_(self.tensor_ring[index])
+        self._device_sequence = self._temporal_sequence
+
     def _inference_failure(self, exc: Exception) -> None:
         self.consecutive_failures += 1
         if self.consecutive_failures >= self.max_failures:
@@ -190,11 +251,13 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
             logging.warning("DeepGaze frame fallback: %s", exc, exc_info=True)
 
     @timed_method("fallback")
-    def _fallback_map(self, frame_bgr: np.ndarray) -> np.ndarray:
+    def _fallback_map(self, frame_bgr: np.ndarray | TensorFrame) -> np.ndarray:
+        if isinstance(frame_bgr, TensorFrame):
+            frame_bgr = frame_bgr.bgr()
         return self.fallback.compute_map(frame_bgr)
 
     @timed_method("bookkeeping")
-    def compute_map(self, frame_bgr: np.ndarray, ingest: bool = True) -> np.ndarray:
+    def compute_map(self, frame_bgr: np.ndarray | TensorFrame, ingest: bool = True) -> np.ndarray:
         self.frames_total += 1
         if ingest:
             self.observe_frame(frame_bgr)
@@ -260,6 +323,15 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
             "model_provenance": dict(self.model_provenance),
             "device": self.device_name,
             "observed_frames": self.observed_frames,
+            "tensor_observed_frames": self.tensor_observed_frames,
+            "tensor_preprocessed_frames": self.tensor_preprocessed_frames,
+            "tensor_cross_device_copies": self.tensor_cross_device_copies,
+            "tensor_cross_device_bytes": self.tensor_cross_device_bytes,
+            "observation_storage": (
+                "rgb_uint8_tensor" if self.observation_tensor_ring is not None else "bgr_uint8_numpy"),
+            "observation_device": (
+                str(self.observation_tensor_ring.device)
+                if self.observation_tensor_ring is not None else "cpu"),
             "temporal_window_frames": self.ring_count,
             "required_window_frames": 16,
             "amp_enabled": self.use_amp,
@@ -271,11 +343,11 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
     def load(self) -> None:
         self._load_model()
 
-    def observe(self, frame: np.ndarray, context: FrameContext) -> None:
+    def observe(self, frame: np.ndarray | TensorFrame, context: FrameContext) -> None:
         self.observe_frame(frame)
 
     @timed_method("bookkeeping")
-    def predict(self, frame: np.ndarray, context: FrameContext) -> BackendPrediction:
+    def predict(self, frame: np.ndarray | TensorFrame, context: FrameContext) -> BackendPrediction:
         previous = self.frames_backend
         saliency = self.compute_map(frame, ingest=False).astype(np.float32, copy=False)
         if self.frames_backend > previous:
@@ -296,6 +368,7 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         finally:
             self.copy_events = []
             self.tensor_ring = self.host_ring = self.cpu_ring = self.model = None
+            self.observation_tensor_ring = None
             self.model_loaded = False
             self.fallback.close()
             self.reset_temporal_state()

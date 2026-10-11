@@ -24,7 +24,7 @@ torchvision 仍是 Ultralytics 的依賴；torchaudio 不是本專案依賴。
 | M0 | 交接紀錄、確認遠端基準 | 完成 |
 | M1 | 只建立所需 VGG 特徵層；strict 載入 DeepGaze checkpoint 與 center bias | 完成，CPU 真實權重比對通過 |
 | M2／第一階段 | TorchCodec 可選解碼器、準確幀序、小容量緩衝、共用縮圖與傳輸診斷 | 完成，CPU 端到端通過；NVDEC 待 Colab |
-| M3／第二階段 | GPU 裁切／縮放與模型前處理；小尺寸 CPU 分析資料，FFmpeg 音訊輸出 | 待實作 |
+| M3／第二階段 | GPU 裁切／縮放與模型前處理；小尺寸 CPU 分析資料，FFmpeg 音訊輸出 | 完成，CPU 整合通過；CUDA 待 Colab |
 | M4 | Colab 分階段收集器、回歸紀錄與提交 | 待實作 |
 
 每個里程碑獨立 commit；各次提交更新本檔。先以可選方式提供 GPU 路徑，T4 實測後再決定預設值。
@@ -52,5 +52,12 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
   Summary 新增 `video_io` 解碼、緩衝與像素傳輸診斷。
   11 個 reader、10 個像素／幾何、2 個設定測試通過；CPU 端到端影片輸出 90/90 幀、60 FPS，含音訊。
   實際非整數 area 縮圖採像素面積積分，測試與 OpenCV 差異不超過 1/255；不使用差異較大的 adaptive-average area。
-- 接續工作：M3 YOLO／DeepGaze tensor 模組已完成未提交，需接上 cascade／render 與 `--frame-processing`；
-  M4 Colab 收集器／說明有草稿，尚需 notebook 與驗證。GPU 結果仍待 Colab。
+- M3：`--frame-processing tensor` 已接上 YOLO segmentation／Pose、DeepGaze 16 幀小圖窗口、
+  precrop 與輸出裁切／縮放。ByteTrack 保留原始 ROI 座標；拒絕依賴真實 CPU 畫素的其他 tracker。
+  271 項回歸測試執行、267 通過／4 跳過（包含 2 個 CUDA 測試；沒有 GPU）。
+  現有模型整合測試確認連續 ID 與不同尺寸 Pose ROI；真實 DeepGaze NumPy／tensor 窗口與 saliency map 相同。
+  實際 CPU tensor 影片輸出 90/90 幀、60 FPS，YOLO 90 次、Pose 11 個 ROI、DeepGaze 4 次，無回退；
+  此測試 saliency max-side=128、gap=3，只驗證功能，不能與先前不同設定比較速度。
+  另測右側 precrop／debug／lossless 三幀輸出成功。獨立程式審查未找到阻擋問題。
+  Summary 的 CUDA allocator peak 僅涵蓋 PyTorch、為程序生命期峰值，不含所有外部 NVDEC／NVENC 配置。
+- 接續工作：M4 Colab 收集器、notebook／說明與測試，完成後推送；T4 短測／完整影片視覺比較仍待使用者執行。
