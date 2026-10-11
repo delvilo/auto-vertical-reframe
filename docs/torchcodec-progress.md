@@ -30,6 +30,10 @@ torchvision 仍是 Ultralytics 的依賴；torchaudio 不是本專案依賴。
 每個里程碑獨立 commit；各次提交更新本檔。先以可選方式提供 GPU 路徑，T4 實測後再決定預設值。
 GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、全數尾幀及 precrop 座標定義。
 
+2026-10-12 後續決定：先持續優化，最後才集中進行 T4 測試，不再要求每個提交立即長片測試。
+各階段的 GPU 驗證責任保留於 [T4 待驗證紀錄](t4-validation-pending.md)。
+下一輪優先降低大圖縮放暫存與 DeepGaze 窗口的小操作次數，維持既有模型與構圖決策。
+
 ## 續作方式
 
 1. 先閱讀本檔、`AGENTS.md`，查看 `git status --short` 與最近 commits。
@@ -77,8 +81,8 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
 - 續作環境：已實際執行 `/workspace/reframe-runtime/setup-torchcodec-cloud.sh`，
   pip check、CPU encoder 與 11 個 TorchCodec reader 測試通過；安裝及啟動指引已更新環境設定草稿。
   草稿尚需在環境設定儲存並發布，才成為後續任務的設定；不影響目前程式與 Git 提交。
-- 下一步僅剩外部驗證：在 Colab T4 先跑 180 幀短測，再逐組跑長片，核對人物交錯、背面／手遮擋、
-  暗場與鏡頭轉動的視覺焦點。沒有 T4 實測前，不改預設值、不宣稱 GPU 加速比例或無 CUDA 問題。
+- 原 M1–M4 的外部驗證保留，依最新決定延後至優化收斂後；細項及省時執行方式見 T4 待驗證紀錄。
+  沒有 T4 實測前，不改預設值、不宣稱 GPU 加速比例或無 CUDA 問題。
 
 ## 已建立的程式里程碑
 
@@ -86,4 +90,4 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
 - `0c9b154`：M1 精簡 DeepGaze checkpoint 載入。
 - `3b476df`：M2 可選 TorchCodec 解碼。
 - `51c45e0`：M3 tensor 模型輸入與輸出處理。
-- M4：含本次紀錄的 Colab 分階段測試提交（以 `git log` 查詢 SHA）。
+- `f9ac46a`：M4 Colab 分階段測試。

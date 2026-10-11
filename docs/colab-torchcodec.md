@@ -3,6 +3,9 @@
 使用 [Colab notebook](https://colab.research.google.com/github/delvilo/auto-vertical-reframe/blob/main/notebooks/colab-torchcodec.ipynb)
 或 [GitHub notebook 檔](../notebooks/colab-torchcodec.ipynb)。這是新 notebook，不覆蓋原本的音訊尾端測試。
 
+目前依使用者決定先持續優化程式，以下測試延至最終版本再集中執行；
+各階段未完成事項請見 [T4 待驗證紀錄](t4-validation-pending.md)。不需要每個 commit 都重跑長片。
+
 | Profile | 解碼 | 模型與輸出影像處理 |
 | --- | --- | --- |
 | `baseline` | OpenCV／CPU | 既有 NumPy 路徑，包含精簡後 DeepGaze 載入 |
