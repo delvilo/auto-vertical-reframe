@@ -58,6 +58,9 @@ class AppConfig:
     max_frames: int | None = None
     stats_interval: float = 0.0
     precrop: str | None = None
+    video_decoder: str = 'opencv'
+    decode_device: str = 'cuda:0'
+    decode_batch_size: int = 4
     device: str = 'auto'
     seg_model: str = 'yolo26n-seg.pt'
     tracker: str = 'bytetrack.yaml'
@@ -159,6 +162,15 @@ def validate_config(args: AppConfig) -> None:
         raise ValueError("stats-interval must be finite and nonnegative (video seconds); 0 disables it")
     if args.precrop not in {None, "middle", "left", "right"}:
         raise ValueError("precrop must be middle, left, right, or omitted for the full frame")
+    if args.video_decoder not in {"opencv", "torchcodec"}:
+        raise ValueError("video-decoder must be opencv or torchcodec")
+    if not isinstance(args.decode_device, str) or (args.decode_device != "cpu" and not (
+            args.decode_device == "cuda" or (args.decode_device.startswith("cuda:")
+                                            and args.decode_device[5:].isascii()
+                                            and args.decode_device[5:].isdigit()))):
+        raise ValueError("decode-device must be cpu, cuda or cuda:N")
+    if isinstance(args.decode_batch_size, bool) or not isinstance(args.decode_batch_size, int) or not 1 <= args.decode_batch_size <= 8:
+        raise ValueError("decode-batch-size must be an integer from 1 to 8")
     if isinstance(args.seg_max_gap, bool) or not isinstance(args.seg_max_gap, int) or args.seg_max_gap < 1:
         raise ValueError("seg-max-gap must be an integer >= 1; 1 runs segmentation every frame")
     if args.seg_thumbnail_mode not in {"lazy", "eager"}:

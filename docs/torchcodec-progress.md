@@ -1,6 +1,6 @@
 # TorchCodec 方案②：分階段工作與續作紀錄
 
-更新日期：2026-10-11（Asia/Taipei）
+更新日期：2026-10-12（Asia/Taipei）
 
 ## 已授權目標
 
@@ -23,7 +23,7 @@ torchvision 仍是 Ultralytics 的依賴；torchaudio 不是本專案依賴。
 | --- | --- | --- |
 | M0 | 交接紀錄、確認遠端基準 | 完成 |
 | M1 | 只建立所需 VGG 特徵層；strict 載入 DeepGaze checkpoint 與 center bias | 完成，CPU 真實權重比對通過 |
-| M2／第一階段 | TorchCodec 可選解碼器、準確幀序、小容量緩衝、共用縮圖與傳輸診斷 | 待實作 |
+| M2／第一階段 | TorchCodec 可選解碼器、準確幀序、小容量緩衝、共用縮圖與傳輸診斷 | 完成，CPU 端到端通過；NVDEC 待 Colab |
 | M3／第二階段 | GPU 裁切／縮放與模型前處理；小尺寸 CPU 分析資料，FFmpeg 音訊輸出 | 待實作 |
 | M4 | Colab 分階段收集器、回歸紀錄與提交 | 待實作 |
 
@@ -46,4 +46,11 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
   16×3×64×96、16×3×96×64 兩組輸出逐元素相同（max_abs_error=0），保留 float64 center bias。
   嚴格檢查缺少／多餘 key 與錯誤 shape；不建立 classifier、不執行遠端 Python 程式碼。
   主要收益是冷啟動下載、載入與 CPU 峰值記憶體；不宣稱降低穩態 GPU forward 時間。
-- 接續工作：M2 TorchCodec reader 與 TensorFrame；M3 YOLO tensor adapter 已有未提交草稿。
+- M2：新增可選 `--video-decoder torchcodec --decode-device cpu|cuda:N`，每批 1–8 幀。
+  拒絕未驗證 CUDA 硬體解碼／CPU fallback，驗證 CFR 時戳，保留原始 FPS 與幀序。
+  預設仍 OpenCV；第一階段模型與輸出維持 NumPy，鏡頭小圖使用 tensor resize。
+  Summary 新增 `video_io` 解碼、緩衝與像素傳輸診斷。
+  11 個 reader、10 個像素／幾何、2 個設定測試通過；CPU 端到端影片輸出 90/90 幀、60 FPS，含音訊。
+  實際非整數 area 縮圖採像素面積積分，測試與 OpenCV 差異不超過 1/255；不使用差異較大的 adaptive-average area。
+- 接續工作：M3 YOLO／DeepGaze tensor 模組已完成未提交，需接上 cascade／render 與 `--frame-processing`；
+  M4 Colab 收集器／說明有草稿，尚需 notebook 與驗證。GPU 結果仍待 Colab。

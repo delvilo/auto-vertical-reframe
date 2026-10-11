@@ -27,9 +27,15 @@ from reframe.video_io import (DirectVideoWriter, LosslessWriter, build_video_fil
 from reframe.debug import draw_debug
 from reframe.timing import PhaseTimings
 from reframe.segments import SEGMENT_SCHEMA_VERSION, SegmentStats, counter_snapshot
+from reframe.frame_pixels import TensorFrame
 
 
 def process_video(args: AppConfig) -> None:
+    with ExitStack() as decoder_resources:
+        _process_video(args, decoder_resources)
+
+
+def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
     started = time.perf_counter()
     pipeline_timings = PhaseTimings(("setup", "decode", "scene", "segmentation", "pose",
                                     "feedback", "saliency", "subjects", "camera",
@@ -51,16 +57,25 @@ def process_video(args: AppConfig) -> None:
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg not found in PATH")
 
-    cap = cv2.VideoCapture(str(input_path))
-    try:
-        if not cap.isOpened():
-            raise RuntimeError(f"Could not open input video: {input_path}")
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    finally:
-        cap.release()
+    tensor_reader = None
+    if args.video_decoder == "torchcodec":
+        from reframe.torchcodec_reader import TorchCodecReader
+        tensor_reader = TorchCodecReader(input_path, device=args.decode_device,
+                                        batch_size=args.decode_batch_size)
+        decoder_resources.callback(tensor_reader.close)
+        fps, frame_w, frame_h, total_frames = (tensor_reader.fps, tensor_reader.width,
+                                              tensor_reader.height, tensor_reader.total_frames)
+    else:
+        cap = cv2.VideoCapture(str(input_path))
+        try:
+            if not cap.isOpened():
+                raise RuntimeError(f"Could not open input video: {input_path}")
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        finally:
+            cap.release()
 
     if not math.isfinite(fps) or fps <= 0 or min(frame_w, frame_h) < 64:
         raise ValueError("Invalid video dimensions or FPS")
@@ -200,7 +215,7 @@ def process_video(args: AppConfig) -> None:
             last_subject_key = None
             scene_index = 0
 
-            frames = iter_video_frames(input_path)
+            frames = iter(tensor_reader) if tensor_reader is not None else iter_video_frames(input_path)
             resources.callback(frames.close)
             actual_yolo_device = None
 
@@ -262,6 +277,9 @@ def process_video(args: AppConfig) -> None:
 
                 context = region.context(frame_idx, (frame_idx - 1) / fps, scene_index)
                 pipeline_timings.switch("segmentation")
+                if isinstance(inference_frame, TensorFrame):
+                    frame = frame.bgr()
+                    inference_frame = region.crop(frame)
                 tracks = tracker.track(inference_frame, context)
                 actual_yolo_device = tracker.actual_device
                 pipeline_timings.switch("pose")
@@ -509,6 +527,8 @@ def process_video(args: AppConfig) -> None:
                     base_crop_w, base_crop_h, state.zoom, frame_w, frame_h
                 )
                 pipeline_timings.switch("render_write")
+                if isinstance(frame, TensorFrame):
+                    frame = frame.bgr()
                 cropped, crop_rect = crop_frame(
                     frame, state.crop_center_x, state.crop_center_y, crop_w, crop_h
                 )
@@ -599,6 +619,13 @@ def process_video(args: AppConfig) -> None:
             stage_seconds = {key: pipeline_timings.seconds[key]
                              for key in ("segmentation", "pose", "saliency", "render_write")}
             summary = {
+                "source_fps": fps,
+                "source_total_frames": total_frames,
+                "video_io": ({**tensor_reader.telemetry(), "frame_processing": "reference",
+                              "pixel_metrics": dict(tensor_reader.pixel_metrics)}
+                             if tensor_reader is not None else
+                             {"decoder": "opencv", "actual_device": "cpu",
+                              "cpu_fallback": None, "frame_processing": "reference"}),
                 "preset": args.preset,
                 "frames_processed": stats["frames_processed"],
                 "stats_interval": args.stats_interval,

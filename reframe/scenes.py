@@ -4,6 +4,7 @@ import logging
 from collections import deque
 import cv2
 import numpy as np
+from reframe.frame_pixels import TensorFrame
 from scenedetect import AdaptiveDetector, SceneManager, open_video
 
 def detect_scenes(
@@ -51,7 +52,8 @@ class InlineSceneDetector:
         self.min_frames, self.threshold = min_frames, threshold
 
     def update(self, frame, frame_idx):
-        small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA)
+        small = (frame.resized_bgr((160, 90)) if isinstance(frame, TensorFrame)
+                 else cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA))
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         hist = cv2.calcHist([small], [0, 1, 2], None, [8, 8, 8], [0, 256] * 3)
         cv2.normalize(hist, hist, alpha=1, norm_type=cv2.NORM_L1)
