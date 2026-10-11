@@ -31,7 +31,9 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         self.tensor_ring = self.host_ring = self.cpu_ring = None
         self.observation_tensor_ring = None
         self.tensor_observed_frames = self.tensor_preprocessed_frames = 0
+        self.tensor_preprocess_batches = 0
         self.tensor_cross_device_copies = self.tensor_cross_device_bytes = 0
+        self.tensor_cross_device_batches = 0
         self.copy_events = []
         self.ring_pos = self.ring_count = 0
         self._temporal_sequence = self._device_sequence = 0
@@ -129,8 +131,14 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         return np.ascontiguousarray(np.transpose(rgb, (2, 0, 1)))
 
     @staticmethod
-    def _preprocess_tensor_frame(rgb):
-        """Convert small RGB CHW uint8 pixels on the inference device."""
+    def _preprocess_tensor_frame(rgb, out=None):
+        """Normalize RGB CHW/NCHW pixels, optionally into the existing ring.
+
+        Copying uint8 pixels directly into a float32 destination avoids a
+        temporary float batch. Division retains the NumPy path's arithmetic.
+        """
+        if out is not None:
+            return out.copy_(rgb).div_(255.0)
         return rgb.to(dtype=torch.float32).div_(255.0)
 
     def _discard_device_window(self) -> None:
@@ -218,6 +226,12 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         self._device_sequence = self._temporal_sequence
 
     def _sync_tensor_device_window(self) -> None:
+        """Refresh unseen slots with at most two contiguous batch operations.
+
+        Both halves of the 32-slot device ring mirror the 16 observations, so
+        the chronological model clip stays a view even when its start wraps.
+        Keeping the source as uint8 bounds storage and any cross-device copy.
+        """
         source = self.observation_tensor_ring
         shape = tuple(source.shape[1:])
         if self.tensor_ring is None or tuple(self.tensor_ring.shape[1:]) != shape:
@@ -225,20 +239,27 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
             self.tensor_ring = torch.empty(
                 (32, *shape), device=self.device_name, dtype=torch.float32)
         pending = min(16, self._temporal_sequence - self._device_sequence)
-        for offset in range(pending):
-            index = (self.ring_pos - pending + offset) % 16
-            pixels = source[index]
+        start = (self.ring_pos - pending) % 16
+        first_count = min(pending, 16 - start)
+        for index, count in ((start, first_count), (0, pending - first_count)):
+            if not count:
+                continue
+            end = index + count
+            pixels = source[index:end]
             # A deliberately different saliency device copies only the small
             # uint8 observation. Same-device CUDA processing never downloads it.
             if pixels.device != self.tensor_ring.device:
-                self.tensor_cross_device_copies += 1
+                # Retain the historical frame count; batches count actual .to
+                # operations now that a transfer can contain multiple frames.
+                self.tensor_cross_device_copies += count
                 self.tensor_cross_device_bytes += pixels.numel() * pixels.element_size()
+                self.tensor_cross_device_batches += 1
                 pixels = pixels.to(device=self.tensor_ring.device)
             with self._timings.measure("preprocess"):
-                chw = self._preprocess_tensor_frame(pixels)
-                self.tensor_preprocessed_frames += 1
-            self.tensor_ring[index].copy_(chw)
-            self.tensor_ring[index + 16].copy_(self.tensor_ring[index])
+                self._preprocess_tensor_frame(pixels, out=self.tensor_ring[index:end])
+                self.tensor_preprocessed_frames += count
+                self.tensor_preprocess_batches += 1
+            self.tensor_ring[index + 16:end + 16].copy_(self.tensor_ring[index:end])
         self._device_sequence = self._temporal_sequence
 
     def _inference_failure(self, exc: Exception) -> None:
@@ -325,8 +346,10 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
             "observed_frames": self.observed_frames,
             "tensor_observed_frames": self.tensor_observed_frames,
             "tensor_preprocessed_frames": self.tensor_preprocessed_frames,
+            "tensor_preprocess_batches": self.tensor_preprocess_batches,
             "tensor_cross_device_copies": self.tensor_cross_device_copies,
             "tensor_cross_device_bytes": self.tensor_cross_device_bytes,
+            "tensor_cross_device_batches": self.tensor_cross_device_batches,
             "observation_storage": (
                 "rgb_uint8_tensor" if self.observation_tensor_ring is not None else "bgr_uint8_numpy"),
             "observation_device": (

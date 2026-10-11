@@ -26,6 +26,8 @@ torchvision 仍是 Ultralytics 的依賴；torchaudio 不是本專案依賴。
 | M2／第一階段 | TorchCodec 可選解碼器、準確幀序、小容量緩衝、共用縮圖與傳輸診斷 | 完成，CPU 端到端通過；NVDEC 待 Colab |
 | M3／第二階段 | GPU 裁切／縮放與模型前處理；小尺寸 CPU 分析資料，FFmpeg 音訊輸出 | 完成，CPU 整合通過；CUDA 待 Colab |
 | M4 | Colab 分階段收集器、回歸紀錄與提交 | 完成，CPU 三組／續作／備份驗證通過 |
+| M5 | 大圖縮小時只取所需像素，減少浮點暫存 | 實作／本機驗證中；T4 延後 |
+| M6 | DeepGaze 小圖窗口合併預處理／複製 | 實作完成，本機回歸通過；T4 延後 |
 
 每個里程碑獨立 commit；各次提交更新本檔。先以可選方式提供 GPU 路徑，T4 實測後再決定預設值。
 GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、全數尾幀及 precrop 座標定義。
@@ -83,6 +85,10 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
   草稿尚需在環境設定儲存並發布，才成為後續任務的設定；不影響目前程式與 Git 提交。
 - 原 M1–M4 的外部驗證保留，依最新決定延後至優化收斂後；細項及省時執行方式見 T4 待驗證紀錄。
   沒有 T4 實測前，不改預設值、不宣稱 GPU 加速比例或無 CUDA 問題。
+- M6：tensor window 每次最多兩段連續批次，直接正規化至現有 float32 ring，不配置額外 float batch。
+  原觀測幀数、時間順序、增量／環繞更新、NumPy 路徑與 lazy load 保持。
+  新增 batch 計數供最終 T4 對照；原跨裝置 copies 計數仍表示影格數。
+  本輪 `test_deepgaze*.py` 執行 21 項，18 通過／3 CUDA 跳過；完整回歸將於 M5 合併後再記錄。
 
 ## 已建立的程式里程碑
 

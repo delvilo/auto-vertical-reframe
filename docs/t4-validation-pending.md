@@ -27,7 +27,7 @@
 | T4-M3C 輸出／顯存 | GPU crop／resize 成片無色彩或邊界異常；NVENC、原 FPS／全部尾幀、音訊終點正常；長片無 OOM／顯存持續累積 | MP4／ffprobe、音畫檢查、像素傳輸量、`cuda_allocator_peak`；必要時 nvidia-smi 外部顯存採樣 | 待測 |
 | T4-M4 收集器 | 中斷時保留已 flush log／Segment，備份可用；同設定成功測試可跳過，變更程式／來源／設定會重跑；裝置降級會被拒絕 | `record.json`、`results.json`、診斷 ZIP、備份及 resume 輸出 | 待測 |
 | T4-M5 大圖縮放暫存優化 | 大圖縮小的 CUDA 畫素誤差、邊緣／非整數縮放與原路徑可接受；peak temporary memory／縮放耗時改善；YOLO／Pose 結果無異常漂移 | 舊／新 resize 的 CUDA event 計時及 peak delta；畫素 max／mean error、框／關鍵點差異 | 待實作／待測 |
-| T4-M6 窗口批次預處理 | pending=0／1／3／16、跨 ring 尾端的窗口仍相同；小圖批次化實際減少操作成本，沒有增加不必要的上傳或重算 | 新舊 window／saliency 比對、preprocess batch 與 frame 數、CUDA event 計時、跨裝置資料量 | 待實作／待測 |
+| T4-M6 窗口批次預處理 | pending=0／1／3／16、跨 ring 尾端的窗口仍相同；小圖批次化實際減少操作成本，沒有增加不必要的上傳或重算 | 新舊 window／saliency 比對、preprocess batch 與 frame 數、CUDA event 計時、跨裝置資料量 | 本機通過；T4 待測 |
 
 `cuda_allocator_peak` 只涵蓋 PyTorch allocator，不能代表 NVDEC／NVENC 和其他程序的全部顯存。
 host wall 計時包含不同程度的等待，不能直接視為 CUDA kernel 時間。比較 GPU 小操作時另用 CUDA events，
@@ -51,6 +51,16 @@ host wall 計時包含不同程度的等待，不能直接視為 CUDA kernel 時
    主角切換及各階段計時。DeepGaze 在第二人搶鏡時可能是正確決策，不以呼叫數越少作為單一成功條件。
 
 本次安排不要求現在執行上述 T4 作業。完成代碼優化後，再補齊一組集中驗證紀錄。
+
+## 本輪優化的本機證據（不等於 T4 通過）
+
+- M6：逐幀更新改為最多兩段連續批次，直接寫入既有 float32 ring；保留原本 16 幀觀測與 32 槽鏡像。
+  包含跨尾端、完整刷新、增量／零更新、reset 與 NumPy 正規化相同比對。
+  新增 `saliency_tensor_preprocess_batches`、`saliency_tensor_cross_device_batches`；
+  原 `saliency_tensor_cross_device_copies` 仍是影格數，不能誤讀成批次操作數。
+  三個 CUDA 專用測試仍因沒有 GPU 跳過，最終集中測試時必須補跑。
+  由於正規化直接寫入 ring，dtype conversion／寫入計時歸入 preprocess；評估時同時看 preprocess＋transfer，
+  不能把計時項目之間的移動當作速度收益。
 
 ## 結果登記
 

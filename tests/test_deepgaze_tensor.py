@@ -69,6 +69,20 @@ class TensorDeepGazeTests(unittest.TestCase):
         actual = self.helper._preprocess_tensor_frame(rgb)
         self.assertTrue(torch.equal(actual, expected))
 
+    def test_batched_preprocess_reuses_destination_and_matches_numpy_exactly(self):
+        pixels = torch.arange(256, dtype=torch.uint8).repeat(16 * 3).reshape(16, 3, 4, 64)
+        original = pixels.clone()
+        destination = torch.empty_like(pixels, dtype=torch.float32)
+        actual = self.helper._preprocess_tensor_frame(pixels, out=destination)
+        expected = torch.stack([
+            torch.from_numpy(self.helper._preprocess_frame(
+                frame.flip(0).permute(1, 2, 0).contiguous().numpy()))
+            for frame in pixels
+        ])
+        self.assertEqual(actual.data_ptr(), destination.data_ptr())
+        self.assertTrue(torch.equal(actual, expected))
+        self.assertTrue(torch.equal(pixels, original))
+
     def test_observation_stays_uint8_bounded_without_model_or_download(self):
         self.observe(1, 80)
         self.loader.assert_not_called()
@@ -104,10 +118,55 @@ class TensorDeepGazeTests(unittest.TestCase):
         self.predict(65)
         self.assert_clip(50, 65)
         self.assertEqual(self.helper.telemetry()["tensor_preprocessed_frames"], 35)
+        self.assertEqual(self.helper.telemetry()["tensor_preprocess_batches"], 5)
         self.assertEqual(self.helper.telemetry()["tensor_cross_device_copies"], 0)
         self.assertEqual(self.metrics.get("cpu_materializations", 0), 1)  # Warmup fallback only.
         self.assertIsNone(self.helper.host_ring)
         self.loader.assert_called_once_with()
+
+    def test_wrapped_batches_match_reference_pixels_and_update_only_unseen_frames(self):
+        expected_frames = []
+        pattern = torch.arange(3 * 64 * 128, dtype=torch.int32).reshape(3, 64, 128)
+
+        def observe(first, last):
+            for index in range(first, last + 1):
+                pixels = ((pattern + index) % 256).to(torch.uint8)
+                self.helper.observe_frame(TensorFrame(pixels, self.metrics))
+                expected_frames.append(torch.from_numpy(self.helper._preprocess_frame(
+                    pixels.flip(0).permute(1, 2, 0).contiguous().numpy())))
+
+        observe(1, 30)  # Full window starts at slot 14: two contiguous spans.
+        with patch.object(self.helper, "_preprocess_tensor_frame",
+                          wraps=self.helper._preprocess_tensor_frame) as preprocess:
+            self.predict(30)
+        self.assertEqual([call.args[0].shape[0] for call in preprocess.call_args_list], [2, 14])
+        self.assertTrue(torch.equal(self.model.clips[-1], torch.stack(expected_frames[-16:])))
+        ring_storage = self.helper.tensor_ring.data_ptr()
+        unchanged = self.helper.tensor_ring[3:14].clone()
+
+        observe(31, 35)  # Five unseen frames cross the physical ring boundary.
+        with patch.object(self.helper, "_preprocess_tensor_frame",
+                          wraps=self.helper._preprocess_tensor_frame) as preprocess:
+            self.predict(35)
+        self.assertEqual([call.args[0].shape[0] for call in preprocess.call_args_list], [2, 3])
+        self.assertEqual(self.helper.tensor_ring.data_ptr(), ring_storage)
+        self.assertTrue(torch.equal(self.helper.tensor_ring[3:14], unchanged))
+        self.assertTrue(torch.equal(self.helper.tensor_ring[:16], self.helper.tensor_ring[16:]))
+        self.assertTrue(torch.equal(self.model.clips[-1], torch.stack(expected_frames[-16:])))
+        self.assertEqual(self.helper.telemetry()["tensor_preprocessed_frames"], 21)
+        self.assertEqual(self.helper.telemetry()["tensor_preprocess_batches"], 4)
+
+    def test_repeated_prediction_without_observations_does_not_preprocess_again(self):
+        self.observe(1, 16)
+        self.predict(16)
+        original = self.model.clips[-1].clone()
+        with patch.object(self.helper, "_preprocess_tensor_frame",
+                          wraps=self.helper._preprocess_tensor_frame) as preprocess:
+            self.predict(16)
+        preprocess.assert_not_called()
+        self.assertTrue(torch.equal(self.model.clips[-1], original))
+        self.assertEqual(self.helper.telemetry()["tensor_preprocessed_frames"], 16)
+        self.assertEqual(self.helper.telemetry()["tensor_preprocess_batches"], 1)
 
     def test_reset_and_geometry_change_require_new_complete_window(self):
         self.observe(1, 16)
@@ -124,6 +183,8 @@ class TensorDeepGazeTests(unittest.TestCase):
         self.observe(48, 48, shape=(96, 128))
         self.assertEqual(self.predict(48, (96, 128)).map.shape, (96, 128))
         self.assert_clip(33, 48)
+        self.assertEqual(self.helper.telemetry()["tensor_preprocessed_frames"], 48)
+        self.assertEqual(self.helper.telemetry()["tensor_preprocess_batches"], 3)
         self.loader.assert_called_once_with()
 
     def test_numpy_tensor_mode_transitions_do_not_reuse_stale_windows(self):
@@ -163,6 +224,24 @@ class TensorDeepGazeTests(unittest.TestCase):
         self.assertEqual(self.helper.telemetry()["tensor_cross_device_copies"], 0)
         self.assertEqual(self.metrics.get("device_to_host_bytes", 0), 0)
         self.assert_clip(1, 16)
+        self.observe(17, 30, device="cuda:0")
+        self.predict(30, device="cuda:0")
+        self.observe(31, 35, device="cuda:0")
+        self.predict(35, device="cuda:0")
+        self.assert_clip(20, 35)
+        self.assertEqual(self.helper.telemetry()["tensor_preprocessed_frames"], 35)
+        self.assertEqual(self.helper.telemetry()["tensor_preprocess_batches"], 4)
+        self.assertEqual(self.helper.telemetry()["tensor_cross_device_copies"], 0)
+        self.assertEqual(self.metrics.get("device_to_host_bytes", 0), 0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA for normalization parity")
+    def test_cuda_batched_normalization_matches_numpy_within_float32_precision(self):
+        pixels = torch.arange(256, dtype=torch.uint8).reshape(1, 1, 16, 16).expand(16, 3, 16, 16)
+        expected = self.helper._preprocess_tensor_frame(pixels)
+        device_pixels = pixels.to("cuda:0")
+        output = torch.empty_like(device_pixels, dtype=torch.float32)
+        actual = self.helper._preprocess_tensor_frame(device_pixels, out=output)
+        torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=torch.finfo(torch.float32).eps)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA for device transfer checks")
     def test_cuda_observations_cpu_saliency_copies_small_uint8_frames(self):
@@ -171,7 +250,14 @@ class TensorDeepGazeTests(unittest.TestCase):
         self.assertEqual(self.helper.tensor_ring.device.type, "cpu")
         self.assertEqual(self.helper.telemetry()["tensor_cross_device_copies"], 16)
         self.assertEqual(self.helper.telemetry()["tensor_cross_device_bytes"], 16 * 64 * 128 * 3)
+        self.assertEqual(self.helper.telemetry()["tensor_cross_device_batches"], 1)
         self.assert_clip(1, 16)
+        self.observe(17, 35, device="cuda:0")
+        self.predict(35, device="cuda:0")
+        self.assert_clip(20, 35)
+        self.assertEqual(self.helper.telemetry()["tensor_cross_device_copies"], 32)
+        self.assertEqual(self.helper.telemetry()["tensor_cross_device_bytes"], 32 * 64 * 128 * 3)
+        self.assertEqual(self.helper.telemetry()["tensor_cross_device_batches"], 3)
 
 
 if __name__ == "__main__":
