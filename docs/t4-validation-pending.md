@@ -26,7 +26,7 @@
 | T4-M3B DeepGaze tensor window | 小圖留在 GPU；完整 16 幀時間順序、ring wrap、跨切鏡 reset、久未使用後更新正確；實際模型有執行且無 fallback | CUDA window tests、`saliency_tensor_*`、16 幀來源／結果比對、真實 forward／fallback 計數 | 待測 |
 | T4-M3C 輸出／顯存 | GPU crop／resize 成片無色彩或邊界異常；NVENC、原 FPS／全部尾幀、音訊終點正常；長片無 OOM／顯存持續累積 | MP4／ffprobe、音畫檢查、像素傳輸量、`cuda_allocator_peak`；必要時 nvidia-smi 外部顯存採樣 | 待測 |
 | T4-M4 收集器 | 中斷時保留已 flush log／Segment，備份可用；同設定成功測試可跳過，變更程式／來源／設定會重跑；裝置降級會被拒絕 | `record.json`、`results.json`、診斷 ZIP、備份及 resume 輸出 | 待測 |
-| T4-M5 大圖縮放暫存優化 | 大圖縮小的 CUDA 畫素誤差、邊緣／非整數縮放與原路徑可接受；peak temporary memory／縮放耗時改善；YOLO／Pose 結果無異常漂移 | 舊／新 resize 的 CUDA event 計時及 peak delta；畫素 max／mean error、框／關鍵點差異 | 待實作／待測 |
+| T4-M5 大圖縮放暫存優化 | 大圖縮小的 CUDA 畫素誤差、邊緣／非整數縮放與原路徑可接受；peak temporary memory／縮放耗時改善；YOLO／Pose 結果無異常漂移 | 舊／新 resize 的 CUDA event 計時及 peak delta；畫素 max／mean error、框／關鍵點差異 | CPU 幾何通過；CUDA 路徑待測 |
 | T4-M6 窗口批次預處理 | pending=0／1／3／16、跨 ring 尾端的窗口仍相同；小圖批次化實際減少操作成本，沒有增加不必要的上傳或重算 | 新舊 window／saliency 比對、preprocess batch 與 frame 數、CUDA event 計時、跨裝置資料量 | 本機通過；T4 待測 |
 
 `cuda_allocator_peak` 只涵蓋 PyTorch allocator，不能代表 NVDEC／NVENC 和其他程序的全部顯存。
@@ -54,6 +54,13 @@ host wall 計時包含不同程度的等待，不能直接視為 CUDA kernel 時
 
 ## 本輪優化的本機證據（不等於 T4 通過）
 
+- M5：CUDA 大幅縮小採 uint8 鄰點取樣後才轉 float32；限兩軸不放大、目的面積不超過來源 1/8、
+  來源最大邊不超過 8192。其他路徑保持原先的 interpolation。
+  座標快取最多 16 組，不快取全域影像；`video_io.pixel_metrics.bilinear_sampled_calls` 記錄實際觸發次數。
+  CPU helper 測試涵蓋奇數／4K／直式／單軸／非連續 precrop、高對比畫素，與 native 相差至多 1/255。
+  CPU 原語實測部分情況較慢，因此 CPU 不啟用這條路徑，也不能由 CPU 計時推論 CUDA 速度。
+  4K→640×360 的原始來源 float 暫存約 94.92 MiB，新的目的暫存估算約 8.57 MiB（不含座標與 allocator）；
+  這是配置量估算，不是實測 GPU 峰值。兩項 CUDA 測試分別檢查新路徑／像素與 4K 峰值減少，仍待補跑。
 - M6：逐幀更新改為最多兩段連續批次，直接寫入既有 float32 ring；保留原本 16 幀觀測與 32 槽鏡像。
   包含跨尾端、完整刷新、增量／零更新、reset 與 NumPy 正規化相同比對。
   新增 `saliency_tensor_preprocess_batches`、`saliency_tensor_cross_device_batches`；
@@ -61,6 +68,15 @@ host wall 計時包含不同程度的等待，不能直接視為 CUDA kernel 時
   三個 CUDA 專用測試仍因沒有 GPU 跳過，最終集中測試時必須補跑。
   由於正規化直接寫入 ring，dtype conversion／寫入計時歸入 preprocess；評估時同時看 preprocess＋transfer，
   不能把計時項目之間的移動當作速度收益。
+  實際 32 幀 CPU tensor pipeline 觸發一次真實 DeepGaze，16 幀一次批次更新、無 fallback，輸出 32 幀／60 FPS。
+- 合併後完整本機回歸：298 項執行，293 通過／5 個 CUDA 專用測試跳過。最終 T4 補跑入口：
+
+```bash
+python -m unittest discover -s tests -p test_frame_pixels.py -v
+python -m unittest discover -s tests -p test_deepgaze_tensor.py -v
+```
+
+這些單元測試的 DeepGaze model 是受控測試模型；真實 checkpoint 的 CUDA forward 與長片結果仍需依上表驗證。
 
 ## 結果登記
 

@@ -88,6 +88,8 @@ auto_reframe.py input.mp4 stage2.mp4 --device 0 --saliency-device cuda \
 
 請使用 [Colab 分階段測試說明](docs/colab-torchcodec.md) 先短測再測長片；
 [工作／續作紀錄](docs/torchcodec-progress.md) 記錄各階段驗證與尚待完成的 GPU 測試。
+目前先持續優化，T4 測試延至最終版本集中執行；每階段須補驗的事項保留在
+[T4 待驗證紀錄](docs/t4-validation-pending.md)，不需每次提交都重跑長片。
 
 ### Colab：從 MediaPipe 遷移
 

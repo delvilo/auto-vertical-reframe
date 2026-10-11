@@ -26,7 +26,7 @@ torchvision 仍是 Ultralytics 的依賴；torchaudio 不是本專案依賴。
 | M2／第一階段 | TorchCodec 可選解碼器、準確幀序、小容量緩衝、共用縮圖與傳輸診斷 | 完成，CPU 端到端通過；NVDEC 待 Colab |
 | M3／第二階段 | GPU 裁切／縮放與模型前處理；小尺寸 CPU 分析資料，FFmpeg 音訊輸出 | 完成，CPU 整合通過；CUDA 待 Colab |
 | M4 | Colab 分階段收集器、回歸紀錄與提交 | 完成，CPU 三組／續作／備份驗證通過 |
-| M5 | 大圖縮小時只取所需像素，減少浮點暫存 | 實作／本機驗證中；T4 延後 |
+| M5 | 大圖縮小時只取所需像素，減少浮點暫存 | 實作完成，CPU 幾何通過；CUDA 待測 |
 | M6 | DeepGaze 小圖窗口合併預處理／複製 | 實作完成，本機回歸通過；T4 延後 |
 
 每個里程碑獨立 commit；各次提交更新本檔。先以可選方式提供 GPU 路徑，T4 實測後再決定預設值。
@@ -88,7 +88,16 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
 - M6：tensor window 每次最多兩段連續批次，直接正規化至現有 float32 ring，不配置額外 float batch。
   原觀測幀数、時間順序、增量／環繞更新、NumPy 路徑與 lazy load 保持。
   新增 batch 計數供最終 T4 對照；原跨裝置 copies 計數仍表示影格數。
-  本輪 `test_deepgaze*.py` 執行 21 項，18 通過／3 CUDA 跳過；完整回歸將於 M5 合併後再記錄。
+  本輪 `test_deepgaze*.py` 執行 21 項，18 通過／3 CUDA 跳過。
+- M5：CUDA 雙線性大幅縮小採先取樣 uint8 再轉小型 float 暫存，限面積 ≤1/8、两軸不放大、來源最大邊 ≤8192。
+  CPU 與放大維持原路徑。座標快取上限 16，不留全域影像；新增 `bilinear_sampled_calls`。
+  CPU 對原實作畫素差至多 1/255；GPU 誤差、峰值與速度全部保留 T4 待驗證，未當作已加速。
+  實際新窗口 pipeline 輸出 32 幀／60 FPS、真實 DeepGaze 1 次、16 幀一次更新、0 fallback；
+  log：`/workspace/reframe-runtime/validation/tensor-batched-window.log`。
+- M5／M6 合併後完整回歸：298 項執行、293 通過／5 個 CUDA 專用測試跳過。
+  包含現有 YOLO 模型與真實 DeepGaze／upstream 精確比對；不代表任何新 CUDA 路徑已在 T4 通過。
+  log：`/workspace/reframe-runtime/validation/tensor-optimizations-final-tests.log`；
+  resize helper 的 CPU 量測／暫存估算：同目錄 `tensor-resize-cpu-20261012.json`。
 
 ## 已建立的程式里程碑
 
@@ -97,3 +106,6 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
 - `3b476df`：M2 可選 TorchCodec 解碼。
 - `51c45e0`：M3 tensor 模型輸入與輸出處理。
 - `f9ac46a`：M4 Colab 分階段測試。
+- `d28920a`：保留各階段 T4 項目，延後集中測試。
+- `46bcbfb`：M6 DeepGaze 小圖窗口批次預處理。
+- M5：含本次紀錄的大圖縮小暫存優化提交（以 `git log` 查詢 SHA）。

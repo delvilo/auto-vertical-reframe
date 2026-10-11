@@ -4,10 +4,12 @@ Tensor interpolation has the same geometry as the reference OpenCV path but can
 round pixels differently. Area resizing integrates fractional source pixels;
 PyTorch's adaptive-average "area" mode is not equivalent for noninteger scales.
 Timers measure host wall time (including downloads),
-not CUDA kernel time. No global cache or full-video tensor is retained.
+not CUDA kernel time. A bounded cache retains only resize-coordinate vectors;
+frame pixels and full-video tensors are never stored in a global cache.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 import time
 
 
@@ -34,6 +36,42 @@ def _area_axis(pixels, length, axis):
 
 def _area_resize(pixels, height, width):
     return _area_axis(_area_axis(pixels, width, -1), height, -2)
+
+
+@lru_cache(maxsize=16)
+def _bilinear_sampling_axes(source_h, source_w, height, width, device):
+    """Cache small, read-only coordinate vectors, never source/output pixels."""
+    import torch
+    # Match interpolate(..., align_corners=False)'s half-pixel coordinates.
+    # Work in float32, like the existing float32 interpolation path.
+    y = ((torch.arange(height, device=device, dtype=torch.float32) + 0.5)
+         * (source_h / height) - 0.5).clamp_min_(0)
+    x = ((torch.arange(width, device=device, dtype=torch.float32) + 0.5)
+         * (source_w / width) - 0.5).clamp_min_(0)
+    y0, x0 = y.long(), x.long()
+    y1 = (y0 + 1).clamp_max_(source_h - 1)
+    x1 = (x0 + 1).clamp_max_(source_w - 1)
+    wy, wx = (y - y0)[None, :, None], (x - x0)[None, None, :]
+    return y0, y1, x0, x1, wy, wx, 1 - wy, 1 - wx
+
+
+def _bilinear_sampled_resize(rgb, height, width):
+    """Gather four uint8 neighbors before allocating small float32 tensors.
+
+    This has the same sampling support as non-antialiased bilinear interpolation.
+    It accepts strided precrop/decoder views without making a full-frame copy.
+    At most three destination-sized float32 planes (per channel) and one uint8
+    gather result coexist. Normal float32 rounding may differ by one byte from
+    the native float32 resize after quantization.
+    """
+    source_h, source_w = rgb.shape[-2:]
+    y0, y1, x0, x1, wy, wx, wy0, wx0 = _bilinear_sampling_axes(
+        source_h, source_w, height, width, rgb.device)
+    top = rgb[:, y0[:, None], x0[None, :]].float().mul_(wx0)
+    top.addcmul_(rgb[:, y0[:, None], x1[None, :]].float(), wx)
+    bottom = rgb[:, y1[:, None], x0[None, :]].float().mul_(wx0)
+    bottom.addcmul_(rgb[:, y1[:, None], x1[None, :]].float(), wx)
+    return top.mul_(wy0).addcmul_(bottom, wy)
 
 
 class TensorFrame:
@@ -95,6 +133,15 @@ class TensorFrame:
             started = time.perf_counter()
             if interpolation == "area":
                 pixels = _area_resize(self.rgb.float(), height, width)
+            elif (self.rgb.device.type == "cuda"
+                  and height <= self.shape[0] and width <= self.shape[1]
+                  and height * width * 8 <= self.shape[0] * self.shape[1]
+                  and max(self.shape[:2]) <= 8192):
+                # Large GPU downscales do not need a full float32 source frame.
+                # Keep native interpolation for rendering/upscales and on CPU:
+                # CPU gather overhead can outweigh the saved conversion cost.
+                pixels = _bilinear_sampled_resize(self.rgb, height, width)
+                self._add("bilinear_sampled_calls")
             else:
                 pixels = F.interpolate(self.rgb[None].float(), size=(height, width),
                                        mode="bilinear", align_corners=False)[0]

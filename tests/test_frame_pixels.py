@@ -1,12 +1,14 @@
 """Tensor frames preserve geometry and expose their CPU transfer costs."""
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from ultralytics.data.augment import LetterBox
 
-from reframe.frame_pixels import TensorFrame
+from reframe.frame_pixels import TensorFrame, _bilinear_sampled_resize
 from reframe.precrop import InferenceRegion
 
 
@@ -15,6 +17,98 @@ def frame_from_bgr(pixels, metrics=None):
 
 
 class TensorFrameTests(unittest.TestCase):
+    def test_cpu_large_downscale_preserves_native_pixels_and_path(self):
+        rgb = torch.randint(0, 256, (3, 217, 383), dtype=torch.uint8)
+        expected = F.interpolate(rgb[None].float(), size=(29, 47), mode="bilinear",
+                                 align_corners=False)[0].round().clamp_(0, 255).to(torch.uint8)
+        with patch("reframe.frame_pixels._bilinear_sampled_resize",
+                   side_effect=AssertionError("CPU must keep native resize")):
+            frame = TensorFrame(rgb)
+            actual = frame.resized_rgb((47, 29), "bilinear")
+        self.assertTrue(torch.equal(actual, expected))
+        self.assertEqual(frame.metrics.get("bilinear_sampled_calls", 0), 0)
+
+    def assert_sampled_bilinear_matches_reference(self, rgb, size):
+        expected = F.interpolate(rgb[None].float(), size=size, mode="bilinear",
+                                 align_corners=False)[0].round().clamp_(0, 255)
+        actual = _bilinear_sampled_resize(rgb, *size).round().clamp_(0, 255)
+        self.assertEqual(actual.shape, (3, *size))
+        self.assertEqual(actual.device, rgb.device)
+        self.assertLessEqual(int((actual - expected).abs().max()), 1)
+
+    def test_sampled_bilinear_matches_native_for_odd_tall_wide_and_single_pixel_axes(self):
+        generator = torch.Generator().manual_seed(137)
+        for shape, size in (((217, 383), (47, 91)), ((109, 37), (23, 7)),
+                            ((997, 579), (113, 73)), ((1, 257), (1, 61)),
+                            ((257, 1), (61, 1)), ((2160, 3840), (360, 640))):
+            with self.subTest(shape=shape, size=size):
+                rgb = torch.randint(0, 256, (3, *shape), dtype=torch.uint8,
+                                    generator=generator)
+                self.assert_sampled_bilinear_matches_reference(rgb, size)
+
+    def test_sampled_bilinear_preserves_strided_precrops_and_contrast_edges(self):
+        height, width = 347, 619
+        yy, xx = torch.meshgrid(torch.arange(height), torch.arange(width), indexing="ij")
+        # Decoder RGB may have channels-last strides; cropping further retains
+        # the parent row stride. Alternating bright/dark pixels expose errors
+        # that a constant-color geometry test would hide.
+        hwc = torch.stack((((xx + yy) % 2) * 255, (xx * 31 + yy * 17) % 256,
+                           (xx >= width // 2) * 255), dim=-1).to(torch.uint8)
+        frame = TensorFrame(hwc.permute(2, 0, 1))
+        for mode in ("left", "middle", "right"):
+            with self.subTest(mode=mode):
+                cropped = InferenceRegion.from_frame(width, height, mode).crop(frame)
+                self.assertFalse(cropped.rgb.is_contiguous())
+                self.assert_sampled_bilinear_matches_reference(cropped.rgb, (61, 53))
+
+    def test_sampled_geometry_cache_does_not_reuse_pixels_from_another_frame(self):
+        for value in (0, 255, 19, 173):
+            with self.subTest(value=value):
+                rgb = torch.full((3, 133, 251), value, dtype=torch.uint8)
+                output = _bilinear_sampled_resize(rgb, 31, 47).round().to(torch.uint8)
+                self.assertTrue(torch.all(output == value))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA GPU is unavailable")
+    def test_cuda_sampled_downscale_matches_reference_and_reuses_pixel_cache(self):
+        rgb = torch.randint(0, 256, (719, 1283, 3), dtype=torch.uint8,
+                            device="cuda").permute(2, 0, 1)[:, :, 319:960]
+        frame = TensorFrame(rgb)
+        actual = frame.resized_rgb((149, 167), "bilinear")
+        expected = F.interpolate(rgb[None].float(), size=(167, 149), mode="bilinear",
+                                 align_corners=False)[0].round().clamp_(0, 255)
+        self.assertLessEqual(int((actual.float() - expected).abs().max()), 1)
+        self.assertIs(frame.resized_rgb((149, 167), "bilinear"), actual)
+        self.assertEqual(frame.metrics["bilinear_sampled_calls"], 1)
+        self.assertEqual(frame.metrics["resize_calls"], 1)
+        self.assertEqual(frame.metrics["cache_hits"], 1)
+        self.assertEqual(frame.metrics.get("cpu_materializations", 0), 0)
+        # A smaller reduction and an upsample retain the native path.
+        for size in ((600, 670), (750, 850)):
+            with self.subTest(size=size):
+                frame.resized_rgb(size, "bilinear")
+                self.assertEqual(frame.metrics["bilinear_sampled_calls"], 1)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA GPU is unavailable")
+    def test_cuda_sampled_4k_downscale_reduces_peak_allocated_memory(self):
+        rgb = torch.zeros((3, 2160, 3840), dtype=torch.uint8, device="cuda")
+        torch.cuda.synchronize()
+        baseline = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        frame = TensorFrame(rgb)
+        actual = frame.resized_rgb((640, 360), "bilinear")
+        torch.cuda.synchronize()
+        sampled_peak = torch.cuda.max_memory_allocated() - baseline
+        # Keep the actual output alive and subtract its allocation, as well as
+        # the coordinate cache, from the reference measurement's baseline.
+        baseline = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        reference = F.interpolate(rgb[None].float(), size=(360, 640), mode="bilinear",
+                                  align_corners=False)[0].round().clamp_(0, 255).to(torch.uint8)
+        torch.cuda.synchronize()
+        native_peak = torch.cuda.max_memory_allocated() - baseline
+        self.assertTrue(torch.equal(actual, reference))
+        self.assertLess(sampled_peak, native_peak / 2)
+
     def test_rgb_to_bgr_preserves_bytes_and_materializes_once(self):
         rgb = torch.tensor([[[1, 2], [3, 4]], [[11, 12], [13, 14]],
                             [[21, 22], [23, 24]]], dtype=torch.uint8)
