@@ -72,6 +72,10 @@ class LazyDeepGazeTests(unittest.TestCase):
         self.torch_patch = patch.object(deepgazemr, "torch", self.fake_torch)
         self.torch_patch.start()
         self.addCleanup(self.torch_patch.stop)
+        loader_patch = patch.object(deepgazemr, "load_deepgaze_mr",
+                                    return_value=(self.model, {"loader": "test"}))
+        self.loader = loader_patch.start()
+        self.addCleanup(loader_patch.stop)
         self.helper = deepgazemr.DeepGazeMRSaliencyHelper(device="cpu", max_side=128)
         self.addCleanup(self.helper.close)
         self.helper.fallback.compute_map = MagicMock(
@@ -100,7 +104,7 @@ class LazyDeepGazeTests(unittest.TestCase):
 
     def test_observing_stable_video_never_loads_or_stages_model(self):
         self.observe(1, 80)
-        self.fake_torch.hub.load.assert_not_called()
+        self.loader.assert_not_called()
         self.fake_torch.empty.assert_not_called()
         self.fake_torch.from_numpy.assert_not_called()
         self.assertEqual(self.helper.cpu_ring.dtype, np.uint8)
@@ -114,12 +118,12 @@ class LazyDeepGazeTests(unittest.TestCase):
             self.observe(index, index)
             result = self.predict(index)
             self.assertEqual((result.backend, result.status), ("handcrafted", "warmup"))
-        self.fake_torch.hub.load.assert_not_called()
+        self.loader.assert_not_called()
         self.fake_torch.empty.assert_not_called()
         self.observe(16, 16)
         self.assertEqual(self.predict(16).backend, "deepgazemr")
-        self.fake_torch.hub.load.assert_called_once_with(
-            "mtangemann/deepgazemr", "DeepGazeMR", pretrained=True, trust_repo=False)
+        self.loader.assert_called_once_with()
+        self.fake_torch.hub.load.assert_not_called()
         self.assert_clip(1, 16)
         self.assertEqual(self.helper.telemetry()["prediction_requests"], 16)
         self.assertEqual(self.helper.telemetry()["actual_forward_calls"], 1)
@@ -144,7 +148,7 @@ class LazyDeepGazeTests(unittest.TestCase):
         self.predict(65)
         self.assert_clip(50, 65)
         self.assertEqual(self.fake_torch.from_numpy.call_count, 16)
-        self.fake_torch.hub.load.assert_called_once()
+        self.loader.assert_called_once()
         self.assertEqual(self.helper.telemetry()["actual_forward_calls"], 3)
 
     def test_scene_reset_retains_loaded_model_but_requires_new_window(self):
@@ -158,7 +162,7 @@ class LazyDeepGazeTests(unittest.TestCase):
         self.observe(35, 35)
         self.predict(35)
         self.assert_clip(20, 35)
-        self.fake_torch.hub.load.assert_called_once()
+        self.loader.assert_called_once()
         self.assertEqual(self.helper.telemetry()["actual_forward_calls"], 2)
 
     def test_geometry_change_restarts_window_without_reloading(self):
@@ -170,7 +174,7 @@ class LazyDeepGazeTests(unittest.TestCase):
         result = self.predict(32, (96, 128))
         self.assertEqual(result.map.shape, (96, 128))
         self.assert_clip(17, 32)
-        self.fake_torch.hub.load.assert_called_once()
+        self.loader.assert_called_once()
 
     def test_forward_failure_is_counted_without_claiming_neural_output(self):
         self.observe(1, 16)

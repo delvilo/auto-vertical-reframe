@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from contextlib import nullcontext
-from pathlib import Path
 from typing import Any
 import cv2
 import numpy as np
@@ -10,11 +9,12 @@ from reframe.runtime import torch
 from reframe.contracts import BackendPrediction, FrameContext
 from reframe.saliency.base import SaliencyBackend
 from reframe.saliency.backends.handcrafted import HandcraftedSaliencyHelper
+from reframe.saliency.backends.deepgaze_loader import load_deepgaze_mr
 from reframe.timing import HostTimings, timed_method
 
 
 class DeepGazeMRSaliencyHelper(SaliencyBackend):
-    """Neural video saliency helper leveraging DeepGaze MR via PyTorch Hub."""
+    """Neural video saliency helper with a feature-only DeepGaze MR loader."""
 
     def __init__(
         self,
@@ -42,6 +42,7 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
         self.frames_fallback = 0
         self.actual_forward_calls = 0
         self.model_loaded = False
+        self.model_provenance: dict[str, Any] = {}
         self.consecutive_failures = 0
         self.max_failures = 3
         self._timings = HostTimings(("init", "observe", "preprocess", "transfer",
@@ -82,61 +83,18 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
             return False
 
         try:
-            self.model = torch.hub.load(
-                "mtangemann/deepgazemr",
-                "DeepGazeMR",
-                pretrained=True,
-                trust_repo=self.trust_repo,
-            )
+            self.model, self.model_provenance = load_deepgaze_mr()
             self.model.to(self.device_name)
-            if hasattr(self.model, "center_bias") and torch.is_tensor(
-                self.model.center_bias
-            ):
+            if hasattr(self.model, "center_bias") and torch.is_tensor(self.model.center_bias):
                 self.model.center_bias = self.model.center_bias.to(self.device_name)
             self.model.eval()
             self.model_loaded = True
-            logging.info("Loaded DeepGaze MR saliency model on %s.", self.device_name)
+            logging.info("Loaded feature-only DeepGaze MR on %s.", self.device_name)
             return True
         except Exception as exc:
             logging.warning(
-                "DeepGaze MR automated hub load failed (%s); checking cached repo...",
-                exc, exc_info=True,
+                "DeepGaze MR direct checkpoint load failed: %s", exc, exc_info=True,
             )
-
-        try:
-            self.model = None
-            hub_dir = Path(torch.hub.get_dir())
-            candidate_dirs = sorted(
-                d
-                for d in hub_dir.glob("mtangemann_deepgazemr_*")
-                if d.is_dir()
-                and (d / "data/deepgazemr-ledov.pt").is_file()
-                and (d / "data/center-bias-ledov.pt").is_file()
-            )
-            if candidate_dirs:
-                repo_path = candidate_dirs[0]
-                self.model = torch.hub.load(
-                    str(repo_path),
-                    "DeepGazeMR",
-                    source="local",
-                    pretrained=False,
-                    trust_repo=self.trust_repo,
-                )
-                ckpt_path = repo_path / "data" / "deepgazemr-ledov.pt"
-                bias_path = repo_path / "data" / "center-bias-ledov.pt"
-                checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-                self.model.load_state_dict(checkpoint["model_state_dict"])
-                center_bias = torch.load(bias_path, map_location="cpu", weights_only=True)
-                if not torch.is_tensor(center_bias):
-                    raise ValueError("Missing or invalid center-bias tensor")
-                self.model.center_bias = center_bias.to(self.device_name)
-                self.model.to(self.device_name)
-                self.model.eval()
-                self.model_loaded = True
-                logging.info("Loaded local DeepGaze MR on %s.", self.device_name)
-                return True
-        except Exception as inner_exc:
-            logging.warning("Local DeepGaze MR fallback failed: %s", inner_exc, exc_info=True)
 
         self._disabled = True
         self.model = None
@@ -299,6 +257,7 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
             "prediction_requests": self.frames_total,
             "actual_forward_calls": self.actual_forward_calls,
             "model_loaded": self.model_loaded,
+            "model_provenance": dict(self.model_provenance),
             "device": self.device_name,
             "observed_frames": self.observed_frames,
             "temporal_window_frames": self.ring_count,

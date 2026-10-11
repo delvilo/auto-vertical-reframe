@@ -109,7 +109,9 @@ class SaliencyTimingTests(unittest.TestCase):
             from_numpy=ArrayTensor, inference_mode=nullcontext,
             is_tensor=lambda value: isinstance(value, ArrayTensor), float32=np.float32,
         )
-        with patch.object(deepgazemr, "torch", fake_torch):
+        with patch.object(deepgazemr, "torch", fake_torch), patch.object(
+            deepgazemr, "load_deepgaze_mr", return_value=(model, {})
+        ):
             backend = deepgazemr.DeepGazeMRSaliencyHelper(device="cpu", max_side=128)
             self.addCleanup(backend.close)
             frame = np.zeros((64, 128, 3), np.uint8)

@@ -22,7 +22,7 @@ torchvision 仍是 Ultralytics 的依賴；torchaudio 不是本專案依賴。
 | 里程碑 | 工作 | 狀態 |
 | --- | --- | --- |
 | M0 | 交接紀錄、確認遠端基準 | 完成 |
-| M1 | 只建立所需 VGG 特徵層；strict 載入 DeepGaze checkpoint 與 center bias | 待實作 |
+| M1 | 只建立所需 VGG 特徵層；strict 載入 DeepGaze checkpoint 與 center bias | 完成，CPU 真實權重比對通過 |
 | M2／第一階段 | TorchCodec 可選解碼器、準確幀序、小容量緩衝、共用縮圖與傳輸診斷 | 待實作 |
 | M3／第二階段 | GPU 裁切／縮放與模型前處理；小尺寸 CPU 分析資料，FFmpeg 音訊輸出 | 待實作 |
 | M4 | Colab 分階段收集器、回歸紀錄與提交 | 待實作 |
@@ -42,4 +42,8 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
 - M0：已 fast-forward 至 `032cba5`；未改動使用者的既有 notebook。
 - DeepGaze 已知事實：`deepgazemr-ledov.pt` 約 76.6 MiB，已含全部 32 個 VGG 特徵層權重張量。
   Center bias 約 7.0 MiB；額外的 548.1 MiB ImageNet VGG19 checkpoint 可省略。
-- 接續工作：M1 與 M2 的獨立模組。
+- M1：25 項相關測試通過。既有 checkpoint 的 47 個 state tensors 與 pinned upstream 一致；
+  16×3×64×96、16×3×96×64 兩組輸出逐元素相同（max_abs_error=0），保留 float64 center bias。
+  嚴格檢查缺少／多餘 key 與錯誤 shape；不建立 classifier、不執行遠端 Python 程式碼。
+  主要收益是冷啟動下載、載入與 CPU 峰值記憶體；不宣稱降低穩態 GPU forward 時間。
+- 接續工作：M2 TorchCodec reader 與 TensorFrame；M3 YOLO tensor adapter 已有未提交草稿。
