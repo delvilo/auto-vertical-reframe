@@ -91,6 +91,10 @@ auto_reframe.py input.mp4 stage2.mp4 --device 0 --saliency-device cuda \
 目前先持續優化，T4 測試延至最終版本集中執行；每階段須補驗的事項保留在
 [T4 待驗證紀錄](docs/t4-validation-pending.md)，不需每次提交都重跑長片。
 
+下一階段的主角排程、姿態快取與離線插值比較見
+[影像資料流優化方案](docs/pipeline-optimization-options.md)（待選，尚未實作）。
+`--dead-zone` 所有 preset 與測試收集器已預設為 `0`；可自行指定非零值。
+
 ### Colab：從 MediaPipe 遷移
 
 先將 `/content/auto-vertical-reframe` 切換到要使用的版本，再執行：
@@ -363,7 +367,7 @@ print("測試資料：", run_dir)
 四組均使用 lazy，顯著性細分計時也全部啟用。每組先暖機一次，再量測兩輪並反轉順序，
 共 **12 次程序**；每次最多 600 幀。若每次約兩分鐘，約需 24 分鐘，另加短測與首次下載。
 每次獨立程序仍含模型初始化；暖機及短測結果保留但
-不納入中位數。預設使用 middle、鎖定首位主角、conf=0.3、dead-zone=0.06、FP32 saliency
+不納入中位數。預設使用 middle、鎖定首位主角、conf=0.3、dead-zone=0、FP32 saliency
 及關閉 post-restore。需要重跑舊的三組 eager／lazy 對照時，加上 `--suite thumbnails`；
 該組合全部使用 `bgr-area` 與 `all`，不混入新策略。
 
@@ -539,7 +543,8 @@ python auto_reframe.py input.mp4 output_fixed.mp4 \
 2. **`--fixed-zoom 1.10`（固定縮放倍率）**：
 強制將虛擬攝影機鎖定在 $1.10\times$ 倍率，完全關閉動態數位變焦，杜絕主體稍微前傾或揮手時造成的「鏡頭拉風箱 / 呼吸效應（Zoom Pumping）」。
 3. **`--dead-zone 0.08`（擴大防抖死區）**：
-將中心死區從預設的 $0.06$ 放寬到 $0.08$（畫面寬度 $\pm 8\%$）。只要人物在該範圍內微幅晃動，攝影機位移速度直接歸零，保持絕對靜止。
+預設為 `0`；如需忽略小幅位移，可自行設為 `0.08`（分別以目前裁切寬／高的 8% 判斷）。
+落在該範圍內的軸會停止平移；這是使用者選擇的構圖取捨，不影響變焦死區 `--zoom-dead-zone`。
 4. **`--pan-time 0.55`（極柔和阻尼時間常數）**：
 當主體真的產生大幅度位移走出死區時，攝影機不會突然暴衝，而是以極度絲滑的阻尼過渡（Ease-in-out）平移補位。
 

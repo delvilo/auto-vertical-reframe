@@ -155,7 +155,7 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument(
         "--dead-zone",
         type=float,
-        help="Fraction of crop size; talking_head default .06, others .015",
+        help="Optional pan dead zone as a fraction of crop size; default 0 for every preset",
     )
     parser.add_argument("--zoom-dead-zone", type=float)
     parser.add_argument("--zoom-hold-seconds", type=float)

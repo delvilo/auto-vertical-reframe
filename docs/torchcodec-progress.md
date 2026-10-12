@@ -34,7 +34,9 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
 
 2026-10-12 後續決定：先持續優化，最後才集中進行 T4 測試，不再要求每個提交立即長片測試。
 各階段的 GPU 驗證責任保留於 [T4 待驗證紀錄](t4-validation-pending.md)。
-下一輪優先降低大圖縮放暫存與 DeepGaze 窗口的小操作次數，維持既有模型與構圖決策。
+M5／M6 的大圖縮放暫存與 DeepGaze 窗口優化已完成本機階段。
+下一輪推論排程方案見 [影像資料流優化方案](pipeline-optimization-options.md)：A／B／C 尚待選擇，
+不要把討論方案當成已授權全面實作；本輪僅實作明確要求的 dead-zone 預設值變更。
 
 ## 續作方式
 
@@ -44,6 +46,15 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
 4. 若沒有 CUDA，完成 CPU 邏輯／權重比對與 Colab 測試入口，清楚標記 GPU 驗證待執行。
 
 ## 最新工作紀錄
+
+- 2026-10-12：全 preset 的 `--dead-zone` 改為 0，保留手動非零值；兩個 Colab 收集器同步，
+  TorchCodec resume identity 加入 dead-zone，Summary 記錄平移／縮放死區。
+  原本 hardcoded 0.06 可用參數重現；比較新舊速度與品質時需對齊有效值。
+  排程／Pose／DeepGaze 本輪未改邏輯，參數尚未移除；A／B／C 與精簡建議已保存，
+  T4-D0 與後續 P1–P5 責任列入待驗證紀錄。
+  本機 Python 3.13 的既有 collector／TorchCodec collector／CLI 與 pipeline 生命期測試共 52 項全部通過。
+  另直接驗證四種 preset 預設與非零覆寫、三入口非法範圍／NaN／Inf 拒絕、命令傳遞及 resume identity 區別。
+  未執行新的 GPU 或長片測試，T4 狀態保持待測。
 
 - M0：已 fast-forward 至 `032cba5`；未改動使用者的既有 notebook。
 - DeepGaze 已知事實：`deepgazemr-ledov.pt` 約 76.6 MiB，已含全部 32 個 VGG 特徵層權重張量。

@@ -63,7 +63,8 @@ def identity(args, profile, source_hash, models, code, packages, max_frames):
                          "video_encoder": args.video_encoder, "stats_interval": 5.0,
                          "cpu_diagnostic": args.allow_cpu_diagnostic,
                          "precrop": "middle", "lock_first_subject": True, "saliency_amp": False,
-                         "post_restore": False, "thumbnail_method": "gray-area", "skip_policy": "primary"}}
+                         "post_restore": False, "dead_zone": getattr(args, "dead_zone", 0.0),
+                         "thumbnail_method": "gray-area", "skip_policy": "primary"}}
 
 
 def identity_digest(value):
@@ -318,6 +319,8 @@ def parser():
     result.add_argument("--device", default="0")
     result.add_argument("--saliency-device", choices=("cuda", "cpu"), default="cuda")
     result.add_argument("--video-encoder", default="hevc_nvenc")
+    result.add_argument("--dead-zone", type=float, default=0.0,
+                        help="Optional pan dead zone, 0..0.4 (default 0); part of resume identity")
     result.add_argument("--allow-cpu-diagnostic", action="store_true",
                         help="Permit explicitly selected CPU devices/software encoding; never a T4 benchmark")
     return result
@@ -326,6 +329,8 @@ def parser():
 def main(argv=None):
     arguments = parser()
     args = arguments.parse_args(argv)
+    if not 0 <= args.dead_zone <= 0.4:
+        arguments.error("--dead-zone must be between 0 and 0.4")
     for key in ("repo", "input", "seg_model", "pose_model", "output_dir", "backup_dir"):
         if (value := getattr(args, key)) is not None:
             setattr(args, key, value.resolve())

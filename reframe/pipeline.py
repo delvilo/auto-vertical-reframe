@@ -640,6 +640,8 @@ def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
                 "output_width": args.output_width,
                 "output_height": args.output_height,
                 "post_restore": args.post_restore,
+                "dead_zone": args.dead_zone,
+                "zoom_dead_zone": args.zoom_dead_zone,
                 "precrop": args.precrop,
                 "inference_bounds": region.bounds,
                 "elapsed_seconds": elapsed,

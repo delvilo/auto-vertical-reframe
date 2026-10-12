@@ -116,7 +116,7 @@ class AppConfig:
     video_bitrate: str = '8M'
     lost_hold_seconds: float | None = None
     subject_hold_seconds: float | None = None
-    dead_zone: float | None = None
+    dead_zone: float | None = 0.0
     zoom_dead_zone: float = 0.04
     zoom_hold_seconds: float = 0.4
     fixed_zoom: float | None = None
@@ -282,7 +282,7 @@ def apply_preset(args: AppConfig) -> AppConfig:
     ):
         raise ValueError("fixed-zoom must lie inside min/max zoom")
     if args.dead_zone is None:
-        args.dead_zone = 0.06 if args.preset == "talking_head" else 0.015
+        args.dead_zone = 0.0
 
     if args.pan_time is None:
         args.pan_time = (

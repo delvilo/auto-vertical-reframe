@@ -399,7 +399,7 @@ def command(args, output: Path, case: tuple, warmup: bool = False) -> list[str]:
     result = [sys.executable, "-u", "-m", "reframe", str(args.input), str(output),
             "--seg-model", args.seg_model, "--pose-model", args.pose_model,
             "--device", args.device, "--saliency-device", args.saliency_device,
-            "--precrop", "middle", "--lock-first-subject", "--dead-zone", "0.06",
+            "--precrop", "middle", "--lock-first-subject", "--dead-zone", str(getattr(args, "dead_zone", 0.0)),
             "--conf", "0.3", "--seg-max-gap", str(gap), "--seg-max-age", "0.1",
             "--seg-thumbnail-mode", mode, "--seg-thumbnail-method", method,
             "--seg-skip-policy", policy, "--video-encoder", args.video_encoder,
@@ -534,9 +534,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default="0")
     parser.add_argument("--saliency-device", default="cuda", choices=("cuda", "cpu", "mps", "auto"))
     parser.add_argument("--video-encoder", default="hevc_nvenc")
+    parser.add_argument("--dead-zone", type=float, default=0.0,
+                        help="Optional pan dead zone, 0..0.4 (default 0); use 0.06 to reproduce older runs")
     parser.add_argument("--seg-model", default="yolo26n-seg.pt")
     parser.add_argument("--pose-model", default="yolo26n-pose.pt")
     args = parser.parse_args(argv)
+    if not 0 <= args.dead_zone <= 0.4:
+        parser.error("--dead-zone must be between 0 and 0.4")
     if args.full_video and args.smoke:
         parser.error("--full-video cannot be combined with --smoke; use a separate short smoke first")
     if args.max_frames is None and not args.full_video:

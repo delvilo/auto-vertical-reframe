@@ -17,6 +17,10 @@ FFmpeg／HEVC NVENC 和音訊尾端修正。`--post-restore` 關閉。gap 預設
 三組均保留 `gray-area` 縮圖、`primary` 跳幀策略和 lazy thumbnail；避免把偵測排程變更當成解碼加速。
 GPU 色彩轉換／插值可能造成細微像素與模型結果差異，仍須看影片。
 
+`--dead-zone` 現在所有 preset 與收集器預設為 `0`，需要時可自行指定，例如 `--dead-zone 0.06`。
+此值記入續作 identity；比較速度時三組必須一致，舊 0.06 的成片不可當成新 0 的等設定品質對照。
+這不會關閉相機平滑或變更 `--zoom-dead-zone`。
+
 ## 先短測，再逐組完整影片
 
 沿用可執行專案的 Python 3.13+、PyTorch 2.11+／相容 torchvision 環境。Notebook 保持 torch／torchvision
