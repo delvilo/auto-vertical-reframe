@@ -22,9 +22,9 @@ Python 3.13 開發環境：`/workspace/venvs/reframe-py313/bin/python`，目前�
 
 | 階段 | 檔案責任 | 狀態 |
 | --- | --- | --- |
-| B1 可靠度／快取 | perception/reliability.py、pose.py | 完成；54 項相關測試通過，T4 待測 |
-| B2 遮罩／分割排程 | contracts.py、perception/segmentation.py | 完成；40 項分割與 11 項 primary 測試通過，T4 待測 |
-| B3 三級切換 | saliency/cascade.py、factory.py | 完成；37 項 cascade／timing 測試通過，T4 待測 |
+| B1 可靠度／快取 | perception/reliability.py、pose.py | 完成；54 項相關測試通過，提交 `5ddcf1a`，T4 待測 |
+| B2 遮罩／分割排程 | contracts.py、perception/segmentation.py | 完成；40 項分割與 11 項 primary 測試通過，提交 `5ddcf1a`，T4 待測 |
+| B3 三級切換 | saliency/cascade.py、factory.py | 完成；37 項 cascade／timing 測試通過，提交 `5ddcf1a`，T4 待測 |
 | B4 設定／相容遷移 | config.py、cli.py | 完成；24 項相關測試通過，提交 `7bf651a` |
 | B5 整合／收集器 | pipeline.py、precrop.py、segments.py、scripts | 完成；52 項 collector 測試通過，最終整體驗證見下方 |
 

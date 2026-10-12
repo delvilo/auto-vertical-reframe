@@ -173,6 +173,19 @@ class ColabBenchmarkTests(unittest.TestCase):
                                   in enumerate(zip(previous, current)) if old != new])
         self.assertEqual(changed_flags, [["--seg-max-gap"], ["--seg-thumbnail-method"], ["--seg-skip-policy"]])
         self.assertTrue(all("--post-restore" not in command for command in commands))
+        self.assertTrue(all("--saliency-trust-repo" not in command for command in commands))
+
+    def test_ablation_gap_overrides_profile_without_discarding_other_settings(self):
+        args = SimpleNamespace(input=Path("input.mp4"), seg_model="seg.pt", pose_model="pose.pt",
+                               device="0", saliency_device="cuda", video_encoder="hevc_nvenc", max_frames=600,
+                               tracking_profile="fast", seg_max_age=.09, cue_interval=.12, pose_max_age=.3)
+        for case in benchmark.CASES:
+            cmd = benchmark.command(args, Path("output.mp4"), case)
+            for flag, expected in (("--tracking-profile", "fast"), ("--seg-max-gap", str(case[1])),
+                                   ("--seg-max-age", "0.09"), ("--cue-interval", "0.12"),
+                                   ("--pose-max-age", "0.3")):
+                with self.subTest(case=case[0], flag=flag):
+                    self.assertEqual(cmd[cmd.index(flag) + 1], expected)
 
     def test_full_commands_omit_limits_and_warmups_use_independent_limit(self):
         args = SimpleNamespace(input=Path("input.mp4"), seg_model="seg.pt", pose_model="pose.pt",
@@ -295,6 +308,48 @@ class ColabBenchmarkTests(unittest.TestCase):
                 benchmark.validate_segments([changed], record)
         with self.assertRaisesRegex(ValueError, "no segments"):
             benchmark.validate_segments([], record)
+
+    def test_optional_scheduling_diagnostics_conserve_counts_without_requiring_old_logs_to_have_them(self):
+        record, row = summary(), segment()
+        benchmark.validate_segments([row], record)
+        for key in benchmark.OPTIONAL_SEGMENT_COUNTER_KEYS:
+            record[key], row[key] = 3, 3
+        for key in benchmark.OPTIONAL_SEGMENT_MAP_KEYS:
+            record[key], row[key] = {"stable": 3}, {"stable": 3}
+        benchmark.validate_segments([row], record)
+        self.assertEqual(benchmark.parse_summary("Summary: " + json.dumps(record)), record)
+        for key in benchmark.OPTIONAL_SEGMENT_COUNTER_KEYS | benchmark.OPTIONAL_SEGMENT_MAP_KEYS:
+            changed = deepcopy(row)
+            changed.pop(key)
+            with self.subTest(key=key, error="missing segment"), self.assertRaises(ValueError):
+                benchmark.validate_segments([changed], record)
+            changed = deepcopy(record)
+            changed.pop(key)
+            with self.subTest(key=key, error="missing summary"), self.assertRaises(ValueError):
+                benchmark.validate_segments([row], changed)
+            changed = deepcopy(row)
+            changed[key] = {"stable": 4} if key in benchmark.OPTIONAL_SEGMENT_MAP_KEYS else 4
+            with self.subTest(key=key, error="sum mismatch"), self.assertRaisesRegex(ValueError, "does not sum"):
+                benchmark.validate_segments([changed], record)
+        with tempfile.TemporaryDirectory() as directory:
+            result = {"case": "balanced", "warmup": False, "repeat": 1, "status": "ok"}
+            benchmark.save_run_segments(result, Path(directory), "run", "Segment: " + json.dumps(row))
+            csv = Path(result["segments_csv"]).read_text()
+            for key in benchmark.OPTIONAL_SEGMENT_COUNTER_KEYS:
+                self.assertIn(key, csv)
+            for key in benchmark.OPTIONAL_SEGMENT_MAP_KEYS:
+                self.assertIn(key + ".stable", csv)
+
+    def test_optional_diagnostics_reject_invalid_counts_and_preserve_partial_recovery(self):
+        for key in benchmark.OPTIONAL_SEGMENT_COUNTER_KEYS | benchmark.OPTIONAL_SEGMENT_MAP_KEYS:
+            for invalid in (-1, .5, True, None, float("nan"), float("inf")):
+                record = summary()
+                record[key] = {"unstable": invalid} if key in benchmark.OPTIONAL_SEGMENT_MAP_KEYS else invalid
+                with self.subTest(key=key, invalid=invalid), self.assertRaisesRegex(ValueError, "diagnostic count"):
+                    benchmark.parse_summary("Summary: " + json.dumps(record))
+        rows, errors = benchmark.extract_segments('Segment: {"pose_extension_hits":2}\nSegment: {', strict=False)
+        self.assertEqual(rows, [{"pose_extension_hits": 2}])
+        self.assertEqual(len(errors), 1)
 
     def test_failed_child_preserves_partial_segments_and_malformed_tail(self):
         with tempfile.TemporaryDirectory() as directory:

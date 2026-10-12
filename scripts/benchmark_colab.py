@@ -18,6 +18,13 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# Script entry points run with scripts/ on sys.path. This configuration module
+# is deliberately lightweight: collectors must not import models before preflight.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from reframe.config import TRACKING_PROFILES, tracking_settings
+
+
 CASES = (("gap1-baseline", 1, "lazy", "bgr-area", "all"),
          ("gap3-bgr-all", 3, "lazy", "bgr-area", "all"),
          ("gap3-gray-all", 3, "lazy", "gray-area", "all"),
@@ -48,6 +55,29 @@ SEGMENT_COUNTER_KEYS = {"seg_detector_calls", "seg_predicted_frames", "seg_thumb
 SEGMENT_MAP_KEYS = {"seg_refresh_reasons", "seg_gate_diagnostics", "seg_timing_seconds",
                     "saliency_tier_reasons", "saliency_timing_seconds", "saliency_deepgaze_timing_seconds",
                     "pipeline_timing_seconds"}
+# Additive diagnostics: historical schema-1 segments remain readable. Once a
+# field is emitted, however, every segment and the final summary must conserve it.
+OPTIONAL_SEGMENT_COUNTER_KEYS = {"seg_secondary_prediction_frames", "pose_extension_hits",
+                                 "saliency_risk_escalations", "saliency_cooldown_bypasses"}
+OPTIONAL_SEGMENT_MAP_KEYS = {"seg_mask_evidence_counts", "seg_pose_feedback_counts",
+                            "seg_measurement_age_counts", "seg_interval_counts",
+                            "pose_extension_reasons", "pose_cache_age_bins", "pose_refresh_reasons",
+                            "saliency_risk_reasons", "saliency_pose_reliability_reasons"}
+
+
+def validate_optional_diagnostics(record: dict) -> None:
+    for key in OPTIONAL_SEGMENT_COUNTER_KEYS | OPTIONAL_SEGMENT_MAP_KEYS:
+        if key not in record:
+            continue
+        value = record[key]
+        if key in OPTIONAL_SEGMENT_MAP_KEYS:
+            if not isinstance(value, dict) or any(not isinstance(item, str) for item in value):
+                raise ValueError(f"Invalid scheduling diagnostic map: {key}")
+            values = value.values()
+        else:
+            values = (value,)
+        if any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in values):
+            raise ValueError(f"Invalid scheduling diagnostic count: {key}")
 
 
 def validate_timing_sum(summary: dict, map_key: str, total_key: str, required: set[str]) -> None:
@@ -82,6 +112,7 @@ def parse_summary(log: str) -> dict:
     for key in ("segmentation", "pose", "saliency", "render_write"):
         if stages.get(key) != summary["pipeline_timing_seconds"][key]:
             raise ValueError(f"Stage timing alias differs from pipeline timing: {key}")
+    validate_optional_diagnostics(summary)
     return summary
 
 
@@ -111,7 +142,9 @@ def validate_segments(rows: list[dict], summary: dict) -> None:
         raise ValueError("Segment count differs from Summary or no segments were emitted")
     previous_end, previous_seconds, previous_scene = 0, 0.0, 1
     gap_count, detected_scenes = 0, set()
+    validate_optional_diagnostics(summary)
     for index, row in enumerate(rows, 1):
+        validate_optional_diagnostics(row)
         if row.get("segment_schema_version") != 1:
             raise ValueError("Unknown Segment schema version")
         for key in ("segment_index", "scene_index", "frame_start", "frame_end", "frames",
@@ -157,13 +190,14 @@ def validate_segments(rows: list[dict], summary: dict) -> None:
         raise ValueError("Segment frames do not sum to Summary")
     if gap_count != summary["seg_detector_calls"] - len(detected_scenes):
         raise ValueError("Segment actual detector gaps do not cover consecutive detections")
-    for key in SEGMENT_COUNTER_KEYS:
+    present = set(summary).union(*(row.keys() for row in rows))
+    for key in SEGMENT_COUNTER_KEYS | (OPTIONAL_SEGMENT_COUNTER_KEYS & present):
         values = [row.get(key) for row in rows]
         if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
             raise ValueError(f"Missing or invalid Segment counter: {key}")
         if sum(values) != summary.get(key):
             raise ValueError(f"Segment counter does not sum to Summary: {key}")
-    for key in SEGMENT_MAP_KEYS:
+    for key in SEGMENT_MAP_KEYS | (OPTIONAL_SEGMENT_MAP_KEYS & present):
         summary_key = "segment_pipeline_timing_seconds" if key == "pipeline_timing_seconds" else key
         if any(not isinstance(row.get(key), dict) for row in rows) or not isinstance(summary.get(summary_key), dict):
             raise ValueError(f"Missing Segment/Summary map: {key}")
@@ -396,15 +430,17 @@ def frame_limit(args, warmup: bool = False) -> int | None:
 
 def command(args, output: Path, case: tuple, warmup: bool = False) -> list[str]:
     _, gap, mode, method, policy = case
+    tracking = tracking_settings(args)
     result = [sys.executable, "-u", "-m", "reframe", str(args.input), str(output),
             "--seg-model", args.seg_model, "--pose-model", args.pose_model,
             "--device", args.device, "--saliency-device", args.saliency_device,
             "--precrop", "middle", "--lock-first-subject", "--dead-zone", str(getattr(args, "dead_zone", 0.0)),
-            "--conf", "0.3", "--seg-max-gap", str(gap), "--seg-max-age", "0.1",
+            "--conf", "0.3", "--tracking-profile", tracking["tracking_profile"],
+            "--seg-max-gap", str(gap), "--seg-max-age", str(tracking["seg_max_age"]),
+            "--cue-interval", str(tracking["cue_interval"]), "--pose-max-age", str(tracking["pose_max_age"]),
             "--seg-thumbnail-mode", mode, "--seg-thumbnail-method", method,
             "--seg-skip-policy", policy, "--video-encoder", args.video_encoder,
-            "--saliency-trust-repo",
-            "--saliency-max-side", "384", "--saliency-interval", "3", "--no-saliency-amp",
+            "--saliency-max-side", "384", "--saliency-interval", str(tracking["saliency_interval"]), "--no-saliency-amp",
             "--stats-interval", str(getattr(args, "stats_interval", 5.0)),
             "--native-debug", "--log-level", getattr(args, "log_level", "INFO"), "--ffmpeg-log-level", "info"]
     limit = frame_limit(args, warmup)
@@ -534,6 +570,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default="0")
     parser.add_argument("--saliency-device", default="cuda", choices=("cuda", "cpu", "mps", "auto"))
     parser.add_argument("--video-encoder", default="hevc_nvenc")
+    parser.add_argument("--tracking-profile", choices=tuple(TRACKING_PROFILES), default="balanced",
+                        help="Tracking/cache defaults; historical ablation suites still explicitly compare gaps 1 and 3")
+    parser.add_argument("--seg-max-age", type=positive_seconds,
+                        help="Override the profile's maximum true segmentation measurement age in seconds")
+    parser.add_argument("--cue-interval", type=float,
+                        help="Override the profile's soft Pose refresh interval in seconds")
+    parser.add_argument("--pose-max-age", type=float,
+                        help="Override the profile's hard Pose cache age in seconds; 0 disables cross-frame reuse")
     parser.add_argument("--dead-zone", type=float, default=0.0,
                         help="Optional pan dead zone, 0..0.4 (default 0); use 0.06 to reproduce older runs")
     parser.add_argument("--seg-model", default="yolo26n-seg.pt")
@@ -541,6 +585,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not 0 <= args.dead_zone <= 0.4:
         parser.error("--dead-zone must be between 0 and 0.4")
+    for key in ("cue_interval", "pose_max_age"):
+        value = getattr(args, key)
+        if value is not None and (not math.isfinite(value) or value < 0):
+            parser.error(f"--{key.replace('_', '-')} must be finite and nonnegative")
+    for key, value in tracking_settings(args).items():
+        setattr(args, key, value)
     if args.full_video and args.smoke:
         parser.error("--full-video cannot be combined with --smoke; use a separate short smoke first")
     if args.max_frames is None and not args.full_video:

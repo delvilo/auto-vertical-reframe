@@ -35,8 +35,8 @@ GPU 解碼不得以 CPU fallback 冒充成功；所有路徑保留原始 FPS、�
 2026-10-12 後續決定：先持續優化，最後才集中進行 T4 測試，不再要求每個提交立即長片測試。
 各階段的 GPU 驗證責任保留於 [T4 待驗證紀錄](t4-validation-pending.md)。
 M5／M6 的大圖縮放暫存與 DeepGaze 窗口優化已完成本機階段。
-下一輪推論排程方案見 [影像資料流優化方案](pipeline-optimization-options.md)：A／B／C 尚待選擇，
-不要把討論方案當成已授權全面實作；本輪僅實作明確要求的 dead-zone 預設值變更。
+使用者已選 B＋舊參數相容遷移＋追蹤 profile；後續從 [方案 B 工作紀錄](scheme-b-progress.md) 續作。
+[原始提案](pipeline-optimization-options.md) 保留比較依據；離線雙向插值 C 不在本輪範圍。
 
 ## 續作方式
 
@@ -46,6 +46,12 @@ M5／M6 的大圖縮放暫存與 DeepGaze 窗口優化已完成本機階段。
 4. 若沒有 CUDA，完成 CPU 邏輯／權重比對與 Colab 測試入口，清楚標記 GPU 驗證待執行。
 
 ## 最新工作紀錄
+
+- 方案 B 已完成本機階段：設定與相容遷移 `7bf651a`、核心與診斷 `5ddcf1a`；
+  共用軀幹證據、真實 mask 時效、主角排程、最高候選 6 幀、有限 Pose 延長與三級風險切換。
+  最終 366 項回歸執行，361 通過／5 個 CUDA 專用測試跳過。真實 CPU tensor 短片 90 幀／60 FPS、
+  DeepGaze 4 次無 fallback，分段診斷守恆；沒有由此宣稱 T4 加速。
+  後續進度與使用方式改讀 [方案 B 工作紀錄](scheme-b-progress.md)，T4 P1–P4 保持待測。
 
 - 2026-10-12：全 preset 的 `--dead-zone` 改為 0，保留手動非零值；兩個 Colab 收集器同步，
   TorchCodec resume identity 加入 dead-zone，Summary 記錄平移／縮放死區。

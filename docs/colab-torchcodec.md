@@ -12,14 +12,21 @@
 | `stage1` | TorchCodec／NVDEC | 共用小縮圖；模型與輸出保留 reference 路徑 |
 | `stage2` | TorchCodec／NVDEC | GPU 裁切、縮放與 tensor 模型輸入；最後成片傳給 FFmpeg |
 
-三組都保留原 FPS、所有輸出幀、middle precrop、主角鎖定、FP32 saliency、原有顯著性決策，以及
-FFmpeg／HEVC NVENC 和音訊尾端修正。`--post-restore` 關閉。gap 預設 1；要測 gap 3 時三組一起改，
+三組都保留原 FPS、所有輸出幀、middle precrop、主角鎖定、FP32 saliency、同版顯著性決策，以及
+FFmpeg／HEVC NVENC 和音訊尾端修正。`--post-restore` 關閉。Notebook 明確使用 gap=1 隔離資料流成本；
+收集器 CLI 未指定 gap 時採 tracking profile 的預設（balanced 為 6）。要改間隔時三組一起改，
 三組均保留 `gray-area` 縮圖、`primary` 跳幀策略和 lazy thumbnail；避免把偵測排程變更當成解碼加速。
 GPU 色彩轉換／插值可能造成細微像素與模型結果差異，仍須看影片。
 
 `--dead-zone` 現在所有 preset 與收集器預設為 `0`，需要時可自行指定，例如 `--dead-zone 0.06`。
 此值記入續作 identity；比較速度時三組必須一致，舊 0.06 的成片不可當成新 0 的等設定品質對照。
 這不會關閉相機平滑或變更 `--zoom-dead-zone`。
+
+新增 `--tracking-profile conservative|balanced|fast`（預設 balanced），以及可覆寫的
+`--seg-max-age`、`--cue-interval`、`--pose-max-age`。這與 `--profiles baseline|stage1|stage2`
+分別控制推論排程及影像資料流。所有有效值均寫入續作 identity；更換 profile 或期限需要相符的新短測。
+方案 B 最終對照方法見 [工作紀錄](scheme-b-progress.md)。歷史 benchmark 的 gap1／gap3 suite 保留原間隔，
+若要測完整 balanced 預設，使用此收集器並省略 `--seg-max-gap`。
 
 ## 先短測，再逐組完整影片
 

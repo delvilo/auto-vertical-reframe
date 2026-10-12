@@ -127,6 +127,32 @@ class RecoveryTests(unittest.TestCase):
         (directory / "record.json").write_text("not json")
         self.assertIsNone(staged.successful_run(self.directory, self.expected))
 
+    def test_tracking_settings_invalidate_recovery_and_match_command(self):
+        self.completed()
+        for name, value in (("tracking_profile", "fast"), ("seg_max_gap", 6),
+                            ("seg_max_age", .08), ("cue_interval", .1), ("pose_max_age", .25)):
+            options = deepcopy(self.args)
+            setattr(options, name, value)
+            changed = staged.identity(options, "stage1", "source-sha", {"seg": "weight-sha"},
+                                      {"pipeline.py": "code-sha"}, {"torch": "2.11"}, 180)
+            with self.subTest(setting=name):
+                self.assertIsNone(staged.successful_run(self.directory, changed))
+                cmd = staged.command(options, "stage1", self.directory / "out.mp4")
+                for setting in ("tracking_profile", "seg_max_gap", "seg_max_age", "cue_interval", "pose_max_age",
+                                "saliency_interval", "seg_skip_policy"):
+                    flag = "--" + setting.replace("_", "-")
+                    self.assertEqual(cmd[cmd.index(flag) + 1], str(changed["settings"][setting]))
+
+    def test_old_success_is_preserved_but_not_reused_with_unknown_tracking_settings(self):
+        directory, record = self.completed()
+        old = deepcopy(record)
+        for key in ("tracking_profile", "seg_max_age", "cue_interval", "pose_max_age", "saliency_interval", "seg_skip_policy"):
+            old["identity"]["settings"].pop(key)
+        staged.atomic_json(directory / "record.json", old)
+        self.assertIsNone(staged.successful_run(self.directory, self.expected))
+        self.assertEqual(staged.successful_run(self.directory, old["identity"]), (directory, old))
+        self.assertEqual((directory / "output.mp4").read_bytes(), b"complete video")
+
     def test_backup_archives_diagnostics_and_preserves_outputs(self):
         directory, _ = self.completed()
         (directory / "native.log").write_text("native traceback\n")
@@ -176,6 +202,9 @@ class EntryPointTests(unittest.TestCase):
         parsed = staged.parser().parse_args(self.argv)
         self.assertEqual(parsed.profiles, ["baseline", "stage1"])
         self.assertEqual(parsed.max_frames, 180)
+        self.assertEqual(parsed.tracking_profile, "balanced")
+        self.assertIsNone(parsed.seg_max_gap)
+        self.assertEqual(staged.tracking_settings(parsed)["seg_max_gap"], 6)
         self.assert_invalid(["--full-video"])
         self.assert_invalid(["--profiles", "baseline", "stage2", "--full-video"])
 
@@ -184,6 +213,35 @@ class EntryPointTests(unittest.TestCase):
         self.assert_invalid(["--decode-device", "cpu"])
         self.assert_invalid(["--video-encoder", "libx264"])
         self.assert_invalid(["--decode-device", "auto"])
+
+    def test_invalid_tracking_overrides_fail_before_preflight(self):
+        with patch.object(staged, "preflight") as preflight:
+            for flag, values in (("--seg-max-gap", ("0", "-1")),
+                                 ("--seg-max-age", ("0", "-1", "nan", "inf")),
+                                 ("--cue-interval", ("-1", "nan", "inf")),
+                                 ("--pose-max-age", ("-1", "nan", "inf"))):
+                for value in values:
+                    with self.subTest(flag=flag, value=value):
+                        self.assert_invalid([flag, value])
+            preflight.assert_not_called()
+
+    def test_profile_defaults_and_explicit_gap_one_have_same_effective_identity_and_command(self):
+        options = args(self.directory)
+        options.seg_max_gap = None
+        for profile in ("conservative", "balanced", "fast"):
+            options.tracking_profile = profile
+            effective = staged.tracking_settings(options)
+            identity = staged.identity(options, "stage2", "input", {}, {}, {}, 180)
+            cmd = staged.command(options, "stage2", self.directory / "output.mp4")
+            for key, value in effective.items():
+                with self.subTest(profile=profile, setting=key):
+                    flag = "--" + key.replace("_", "-")
+                    self.assertEqual(cmd[cmd.index(flag) + 1], str(value))
+                    self.assertEqual(identity["settings"][key], value)
+        options.seg_max_gap, options.pose_max_age = 1, 0
+        cmd = staged.command(options, "stage2", self.directory / "output.mp4")
+        self.assertEqual(cmd[cmd.index("--seg-max-gap") + 1], "1")
+        self.assertEqual(float(cmd[cmd.index("--pose-max-age") + 1]), 0)
 
     def test_nested_backup_is_rejected(self):
         self.assert_invalid(["--backup-dir", str(self.directory / "results" / "nested")])
@@ -211,8 +269,18 @@ class EntryPointTests(unittest.TestCase):
             self.assertEqual(cmd[cmd.index(flag) + 1], value)
         self.assertIn("--no-saliency-amp", cmd)
         self.assertIn("--lock-first-subject", cmd)
-        for absent in ("--post-restore", "--saliency-model", "--fps"):
+        for absent in ("--post-restore", "--saliency-model", "--saliency-trust-repo", "--fps"):
             self.assertNotIn(absent, cmd)
+
+    def test_collectors_import_without_loading_accelerators_or_models(self):
+        source = ("import importlib.util, pathlib, sys\n"
+                  f"root = pathlib.Path({str(ROOT)!r})\n"
+                  "for filename in ('benchmark_colab.py', 'colab_torchcodec.py'):\n"
+                  "    spec = importlib.util.spec_from_file_location(filename, root / 'scripts' / filename)\n"
+                  "    module = importlib.util.module_from_spec(spec)\n"
+                  "    spec.loader.exec_module(module)\n"
+                  "assert not {'torch', 'torchcodec', 'ultralytics', 'cv2', 'numpy'} & set(sys.modules)\n")
+        subprocess.run([sys.executable, "-c", source], check=True, cwd=self.directory, capture_output=True, text=True)
 
 
 class NotebookTests(unittest.TestCase):

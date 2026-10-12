@@ -91,8 +91,9 @@ auto_reframe.py input.mp4 stage2.mp4 --device 0 --saliency-device cuda \
 目前先持續優化，T4 測試延至最終版本集中執行；每階段須補驗的事項保留在
 [T4 待驗證紀錄](docs/t4-validation-pending.md)，不需每次提交都重跑長片。
 
-下一階段的主角排程、姿態快取與離線插值比較見
-[影像資料流優化方案](docs/pipeline-optimization-options.md)（待選，尚未實作）。
+方案 B 的主角排程、有限姿態快取與追蹤 profile 已接入，使用方式與續作紀錄見
+[方案 B](docs/scheme-b-progress.md)。[原始方案比較](docs/pipeline-optimization-options.md) 保留取捨依據，
+離線雙向插值 C 尚未實作。
 `--dead-zone` 所有 preset 與測試收集器已預設為 `0`；可自行指定非零值。
 
 ### Colab：從 MediaPipe 遷移
@@ -134,6 +135,8 @@ editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程�
 - 頭部框由鼻、眼、耳等可信點估算，不是獨立人臉偵測。點位不足時使用人物框／遮罩構圖。
 - COCO 沒有嘴角、腳跟或腳尖；移除未使用的 `chin_y`，並保留分割框下緣以保護腳部。
 - 場景切換清除快取；人物快速移動或重疊會重新推論。`--cue-interval 0` 可逐幀更新。
+- 背面／遮臉不等於 Pose 無效：至少 3 個幾何合理且信心不低於 `max(0.5, keypoint_conf)` 的肩髖點
+  可提供軀幹證據。手腕／手肘信心不足不直接否決軀幹；可靠的大幅肢體動作仍會阻止延長快取。
 - 模型格式錯誤、推論例外或指定 GPU 不可用時，輸出 traceback 並失敗退出。
   單幀沒有可信關鍵點是正常結果，會使用已有的分割構圖資訊。
 
@@ -144,7 +147,8 @@ editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程�
 | `--pose-conf` | `0.25`；姿態人物框的偵測門檻 |
 | `--keypoint-conf` | `0.35`；個別關鍵點的可信度門檻 |
 | `--pose-batch-size` | `4`；每批最多處理的人物 ROI 數 |
-| `--cue-interval` | `0.2` 秒；每個追蹤 ID 的姿態快取更新間隔 |
+| `--cue-interval` | balanced 預設 `0.2` 秒；軟更新時間，穩定且有獨立證據時才可延後 |
+| `--pose-max-age` | balanced 預設 `0.35` 秒；原始 Pose 推論的硬期限，`0` 禁止跨幀沿用 |
 | `--device` | `auto`；分割與姿態共用。`0` 強制第一張 CUDA GPU，`cpu` 使用 CPU |
 
 舊 `--face-model` 已移除；`.task`／`.tflite` 不再是可接受的姿態模型。
@@ -153,7 +157,9 @@ editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程�
 
 ### 動態分割間隔與光流校正
 
-預設在可信的真實偵測連續穩定後，將 YOLO 分割間隔由 **1 → 2 → 3 幀**逐步延長。
+預設 `--tracking-profile balanced`，在可信的真實偵測連續穩定後，將 YOLO 分割間隔由
+**1 → 2 → 3 → 4 → 6 幀**逐步延長。超過 3 幀額外要求兩次相容的真實 Pose、
+近期穩定的真實遮罩摘要及可靠主角追蹤；仍受來源 FPS 與 0.1 秒量測期限限制。
 中間影格以運動預測與低解析度稀疏 KLT 光流校正人物位置；預測框與重映射的姿態
 不會重新計算「最後一次真實偵測」時間，也不能靠互相引用升高穩定度。
 切鏡、追蹤遺失、光流不可靠、人物交錯或畫面變化等事件會要求提前刷新。
@@ -161,20 +167,21 @@ editable 安裝會直接使用其中的模組，後續 `git pull` 後的新程�
 
 | 參數 | 預設／用途 |
 | --- | --- |
-| `--seg-max-gap` | `3`；兩次 YOLO 分割間隔的來源幀數上限，正整數。`1` 關閉跳幀，提供逐幀比較基準 |
+| `--tracking-profile` | `balanced`；也可選 conservative／fast，顯式進階參數優先 |
+| `--seg-max-gap` | balanced／fast 為 `6`，conservative 為 `3`；來源幀數上限。`1` 關閉跳幀，提供逐幀比較基準 |
 | `--seg-max-age` | `0.1`；距上次真實分割的影片時間上限（秒），必須是有限正數；與幀數上限一起生效 |
 | `--seg-thumbnail-mode` | `lazy`；確定需要畫面判斷或光流時才建立縮圖。`eager` 保留原先每幀縮圖方式，供同版本對照 |
 | `--seg-thumbnail-method` | `gray-area`；先轉灰階，再以 `INTER_AREA` 縮小單通道影像。`bgr-area` 保留先縮小 BGR 再轉灰階的方式，供對照 |
-| `--seg-skip-policy` | `primary`；僅在符合安全條件時，容許遠離主角的遺失次要人物不阻止跳幀。`all` 保留所有追蹤目標皆須穩定的條件 |
+| `--seg-skip-policy` | `primary`；符合條件的遠處低風險次要人物可降低優先度。`all` 保留所有追蹤目標皆須穩定的條件 |
 
-例如 60 fps 下，最大 3 幀約為 0.05 秒；較低 FPS 時，0.1 秒上限可能使實際間隔縮短。
-開場及不穩定片段維持逐幀偵測，間隔上限不是固定每三幀才允許偵測。
-目前策略最多升至 3 幀；較大的 `--seg-max-gap` 值不會再擴大間隔。
+60 FPS 下 6 幀為 0.1 秒，30 FPS 下預設期限將間隔限制在 3 幀；開場及不穩定片段會提前偵測。
+balanced 穩定至少 0.5 秒才評估 4 幀、1 秒才評估 6 幀；fast 可於 0.5 秒評估 6 幀。
+conservative 保留最高 3 幀與較短 Pose 快取，仍使用本版共同可靠度及風險保護，不等同舊版程式。
 跳幀僅支援已釘選版本的原生 `BYTETracker`；其他 tracker 會回到逐幀偵測並記錄原因。
 ByteTrack 的預測時鐘會逐個來源影格前進，跳過 YOLO 不等於偵測到空畫面。
 
 **輸出仍保留所有處理範圍內的原始影格、FPS 與音訊時序。** 切鏡檢查、姿態快取時效判斷、
-Saliency 三級策略、DeepGaze 的 16 幀 CPU ring、相機平滑及編碼仍逐幀執行。
+Saliency 三級策略、DeepGaze 的 16 幀來源時間窗口、相機平滑及編碼仍逐幀執行。
 `--precrop` 的推論範圍與原圖輸出定義不變；`--post-restore` 仍預設關閉。
 光流也有成本，追蹤變差還可能增加 Pose／DeepGaze 呼叫，因此要比較整體耗時與構圖品質，
 不能將省下的 YOLO 呼叫比例當成整體加速倍率。
@@ -188,11 +195,16 @@ Saliency 三級策略、DeepGaze 的 16 幀 CPU ring、相機平滑及編碼仍�
 此方式保留上一幀原始影像的唯讀參照；半幅 precrop 是 view，可能暫時持有整張 4K BGR 影像，
 約增加 25 MB 主機記憶體。實際節省張數需扣除補建上一幀縮圖的次數。
 
-`primary` 只放寬「遠處已遺失的次要人物」：以最多 3 個來源幀的運動範圍、3σ 不確定性
-及主角尺寸的安全距離檢查是否可能接近主角。主角未選定／遺失、次要人物新出現／未確認、
-運動資料不可靠或可能交錯，仍立即要求偵測；所有已觀測人物的低信心、稳定度與光流檢查
-仍保留。`seg_gate_diagnostics` 記錄排程時第一個不穩定原因；其中 `distant_lost_allowed`
-只是通過這層檢查的幀數，後续條件仍可能要求偵測，不能當作實際跳幀數。
+`primary` 依實際候選間隔的運動範圍、3σ 不確定性及主角安全距離檢查次要人物。
+balanced／fast 可放行經多次真實量測、面積小且遠離主角的旁人；沒有通過光流的旁人
+只提供明確低可信的預測，不冒充可靠構圖證據。新人物、未確認 ID、靠近／交錯或面積明顯者仍需評估。
+整個推論區域保留影像變化檢查，真實 YOLO 量測期限保留全區重新掃描。
+`seg_gate_diagnostics` 是門檻通過／失敗的計數，不等於實際跳幀數。
+
+Pose 延長快取需兩次相容真實姿態、近期真實遮罩連續、身分穩定及無鄰近／搶鏡人物；
+預測遮罩只保留原始量測時間。`tracking_settings` 記錄展開後設定；
+每五秒 Segment 另有量測年齡分布、Pose 延長／拒絕原因與顯著性風險升級計數。
+各 profile 數值、舊旗標遷移與 T4 待測入口見 [方案 B](docs/scheme-b-progress.md)。
 
 ### 方案 C：三級自動構圖與按需 DeepGaze MR
 
@@ -276,7 +288,7 @@ python3 -u -m reframe \
   --seg-model yolo26n-seg.pt --pose-model yolo26n-pose.pt --device 0 \
   --precrop middle --lock-first-subject --dead-zone 0.15 \
   --video-encoder hevc_nvenc --max-frames 90 \
-  --saliency-device cuda --saliency-trust-repo \
+  --saliency-device cuda \
   --saliency-max-side 384 --saliency-interval 3 --no-saliency-amp \
   --native-debug --log-level DEBUG --ffmpeg-log-level info \
   2>&1 | tee /content/reframe-cascade-middle-test.log

@@ -23,6 +23,11 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from reframe.config import TRACKING_PROFILES, tracking_settings
+
+
 PROFILES = {"baseline": ("opencv", "reference"),
             "stage1": ("torchcodec", "reference"),
             "stage2": ("torchcodec", "tensor")}
@@ -55,16 +60,17 @@ def code_fingerprint(repo: Path) -> dict:
 
 
 def identity(args, profile, source_hash, models, code, packages, max_frames):
+    tracking = tracking_settings(args)
     return {"schema_version": 1, "profile": profile, "source_sha256": source_hash,
             "model_sha256": models, "code_sha256": code, "packages": packages,
-            "settings": {"seg_max_gap": args.seg_max_gap, "max_frames": max_frames,
+            "settings": {**tracking, "max_frames": max_frames,
                          "device": args.device, "saliency_device": args.saliency_device,
                          "decode_device": args.decode_device, "decode_batch_size": args.decode_batch_size,
                          "video_encoder": args.video_encoder, "stats_interval": 5.0,
                          "cpu_diagnostic": args.allow_cpu_diagnostic,
                          "precrop": "middle", "lock_first_subject": True, "saliency_amp": False,
                          "post_restore": False, "dead_zone": getattr(args, "dead_zone", 0.0),
-                         "thumbnail_method": "gray-area", "skip_policy": "primary"}}
+                         "thumbnail_method": "gray-area", "skip_policy": tracking["seg_skip_policy"]}}
 
 
 def identity_digest(value):
@@ -157,7 +163,8 @@ def validate_audio_tail(output: dict, source: dict) -> dict:
 
 def command(args, profile, output):
     benchmark = collector(args.repo)
-    case = (profile, args.seg_max_gap, "lazy", "gray-area", "primary")
+    tracking = tracking_settings(args)
+    case = (profile, tracking["seg_max_gap"], "lazy", "gray-area", tracking["seg_skip_policy"])
     result = benchmark.command(args, output, case)
     decoder, processing = PROFILES[profile]
     result += ["--video-decoder", decoder, "--frame-processing", processing,
@@ -313,7 +320,15 @@ def parser():
     limit = result.add_mutually_exclusive_group()
     limit.add_argument("--max-frames", type=int, default=SMOKE_FRAMES)
     limit.add_argument("--full-video", action="store_true", help="Requires an equivalent successful 180-frame short run per selected profile")
-    result.add_argument("--seg-max-gap", type=int, choices=(1, 3), default=1)
+    result.add_argument("--tracking-profile", choices=tuple(TRACKING_PROFILES), default="balanced")
+    result.add_argument("--seg-max-gap", type=int,
+                        help="Positive override of the tracking profile; use 1 to isolate dataflow speed")
+    result.add_argument("--seg-max-age", type=float,
+                        help="Override true segmentation measurement age limit in seconds")
+    result.add_argument("--cue-interval", type=float,
+                        help="Override soft Pose refresh interval in seconds")
+    result.add_argument("--pose-max-age", type=float,
+                        help="Override hard Pose cache age in seconds; 0 disables cross-frame reuse")
     result.add_argument("--decode-batch-size", type=int, choices=range(1, 9), default=4)
     result.add_argument("--decode-device", default="cuda:0")
     result.add_argument("--device", default="0")
@@ -331,6 +346,16 @@ def main(argv=None):
     args = arguments.parse_args(argv)
     if not 0 <= args.dead_zone <= 0.4:
         arguments.error("--dead-zone must be between 0 and 0.4")
+    if args.seg_max_gap is not None and args.seg_max_gap <= 0:
+        arguments.error("--seg-max-gap must be positive")
+    for key in ("seg_max_age", "cue_interval", "pose_max_age"):
+        value = getattr(args, key)
+        if value is not None and (not math.isfinite(value) or value < 0
+                                  or (key == "seg_max_age" and value == 0)):
+            arguments.error(f"--{key.replace('_', '-')} must be finite and "
+                            + ("positive" if key == "seg_max_age" else "nonnegative"))
+    for key, value in tracking_settings(args).items():
+        setattr(args, key, value)
     for key in ("repo", "input", "seg_model", "pose_model", "output_dir", "backup_dir"):
         if (value := getattr(args, key)) is not None:
             setattr(args, key, value.resolve())
