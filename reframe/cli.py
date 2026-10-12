@@ -5,7 +5,34 @@ import logging
 import os
 import sys
 from dataclasses import fields
-from reframe.config import AppConfig, PRESETS, apply_preset, validate_config
+from reframe.config import (
+    AppConfig, PRESETS, PROFILE_DEFAULT, TRACKING_PROFILES, apply_preset, validate_config,
+)
+
+
+LEGACY_OPTIONS = {
+    "--motion-response": "--pan-time",
+    "--motion-damping": "--pan-time",
+    "--zoom-response": "--zoom-time",
+    "--zoom-damping": "--zoom-time",
+    "--target-alpha": "--target-time",
+    "--zoom-alpha": "--zoom-speed",
+    "--max-step-x": "--pan-speed-x",
+    "--max-step-y": "--pan-speed-y",
+    "--max-missed-frames": "--lost-hold-seconds",
+    "--min-subject-hold-frames": "--subject-hold-seconds",
+    "--saliency-trust-repo": "remove this flag; no longer needed",
+}
+
+
+class _LegacyAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, True if self.nargs == 0 else values)
+        flag = self.option_strings[0]
+        existing = getattr(namespace, "legacy_flags", ())
+        if flag not in existing:
+            namespace.legacy_flags = (*existing, flag)
+
 
 def setup_logging(level: str) -> None:
     logging.basicConfig(
@@ -47,6 +74,9 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
 
     parser.add_argument("--seg-model")
     parser.add_argument("--tracker")
+    parser.add_argument("--tracking-profile", choices=tuple(TRACKING_PROFILES),
+                        help="Coordinated segmentation/Pose scheduling: balanced (default), "
+                             "conservative, or fast; explicit scheduling flags override profile defaults")
     parser.add_argument("--seg-thumbnail-mode", choices=("lazy", "eager"),
                         help="Build tracking thumbnails on demand (lazy, default), or every "
                              "adaptive frame (eager, timing comparison)")
@@ -57,7 +87,8 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
                         help="Permit skipping with distant lost secondary tracks when a primary "
                              "is established (primary, default), or require every track settled (all)")
     parser.add_argument("--seg-max-gap", type=int,
-                        help="Maximum adaptive YOLO segmentation interval in source frames (default: 3); "
+                        help="Maximum adaptive YOLO segmentation interval in source frames "
+                             "(profile default: balanced/fast 6, conservative 3); "
                              "1 runs segmentation every frame")
     parser.add_argument("--seg-max-age", type=float,
                         help="Maximum time between real segmentation measurements in video seconds "
@@ -73,18 +104,13 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument("--output-width", type=int)
     parser.add_argument("--output-height", type=int)
 
-    parser.add_argument("--zoom-alpha", type=float)
-    parser.add_argument("--target-alpha", type=float)
-    parser.add_argument("--motion-response", type=float)
-    parser.add_argument("--motion-damping", type=float)
-    parser.add_argument("--zoom-response", type=float)
-    parser.add_argument("--zoom-damping", type=float)
-    parser.add_argument("--max-missed-frames", type=int)
-    parser.add_argument("--min-subject-hold-frames", type=int)
+    for flag in ("--zoom-alpha", "--target-alpha", "--motion-response",
+                 "--motion-damping", "--zoom-response", "--zoom-damping",
+                 "--max-step-x", "--max-step-y"):
+        parser.add_argument(flag, type=float, action=_LegacyAction, help=argparse.SUPPRESS)
+    for flag in ("--max-missed-frames", "--min-subject-hold-frames"):
+        parser.add_argument(flag, type=int, action=_LegacyAction, help=argparse.SUPPRESS)
     parser.add_argument("--switch-score-threshold", type=float)
-
-    parser.add_argument("--max-step-x", type=float)
-    parser.add_argument("--max-step-y", type=float)
 
     parser.add_argument("--min-zoom", type=float)
     parser.add_argument("--max-zoom", type=float)
@@ -110,8 +136,8 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument("--saliency-max-side", type=int)
     parser.add_argument(
         "--saliency-trust-repo",
-        action="store_true",
-        help="Legacy compatibility flag; DeepGaze now loads verified data without executing Hub code.",
+        action=_LegacyAction, nargs=0,
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument("--speaker-aware-mode", action="store_true")
@@ -149,9 +175,10 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument(
         "--lost-hold-seconds",
         type=float,
-        help="Overrides --max-missed-frames (legacy frames at 30 fps)",
+        help="Seconds to retain a temporarily missing subject (default 40/30 seconds)",
     )
-    parser.add_argument("--subject-hold-seconds", type=float)
+    parser.add_argument("--subject-hold-seconds", type=float,
+                        help="Minimum seconds before a subject switch (default 14/30 seconds)")
     parser.add_argument(
         "--dead-zone",
         type=float,
@@ -163,8 +190,12 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument(
         "--cue-interval",
         type=float,
-        help="Seconds between pose/head updates per track; 0 analyzes every frame",
+        help="Soft Pose refresh interval in video seconds (profile default); "
+             "stable reliable poses may be reused up to pose-max-age; 0 analyzes every frame",
     )
+    parser.add_argument("--pose-max-age", type=float,
+                        help="Hard age limit for cached Pose in video seconds (profile default); "
+                             "0 forbids cross-frame reuse; may be shorter than cue-interval")
     parser.add_argument(
         "--cue-top-k",
         type=int,
@@ -222,12 +253,20 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     )
     parser.add_argument("--lookahead-seconds", type=float)
     defaults = AppConfig()
-    parser.set_defaults(**{field.name: getattr(defaults, field.name) for field in fields(AppConfig)})
-    args = AppConfig(**vars(parser.parse_args(argv)))
+    parser_defaults = {field.name: getattr(defaults, field.name) for field in fields(AppConfig)}
+    # Keep omitted values unresolved until the requested profile is known.
+    # An explicit override equal to another profile's default still wins.
+    parser_defaults.update({key: PROFILE_DEFAULT for key in TRACKING_PROFILES["balanced"]})
+    parser.set_defaults(**parser_defaults)
     try:
+        args = AppConfig(**vars(parser.parse_args(argv)))
         validate_config(args)
     except ValueError as exc:
         parser.error(str(exc))
+    if args.legacy_flags:
+        changes = "; ".join(f"{flag} -> {LEGACY_OPTIONS[flag]}" for flag in args.legacy_flags)
+        print(f"Legacy CLI options accepted: {changes}. Explicit modern options take precedence.",
+              file=sys.stderr, flush=True)
     return args
 
 

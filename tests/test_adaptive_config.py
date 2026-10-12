@@ -10,7 +10,7 @@ from reframe.config import AppConfig, validate_config
 class AdaptiveConfigTests(unittest.TestCase):
     def test_default_schedule(self):
         args = parse_args(["input.mp4", "output.mp4"])
-        self.assertEqual(args.seg_max_gap, 3)
+        self.assertEqual(args.seg_max_gap, 6)
         self.assertEqual(args.seg_max_age, 0.1)
         self.assertEqual(args.seg_thumbnail_mode, "lazy")
         self.assertEqual(args.seg_thumbnail_method, "gray-area")

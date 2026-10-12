@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 
@@ -48,6 +49,47 @@ PRESETS = {
 }
 
 
+TRACKING_PROFILES = {
+    "conservative": {
+        "seg_max_gap": 3, "seg_max_age": 0.1, "cue_interval": 0.2,
+        "pose_max_age": 0.2, "saliency_interval": 3,
+    },
+    "balanced": {
+        "seg_max_gap": 6, "seg_max_age": 0.1, "cue_interval": 0.2,
+        "pose_max_age": 0.35, "saliency_interval": 3,
+    },
+    "fast": {
+        "seg_max_gap": 6, "seg_max_age": 0.1, "cue_interval": 0.25,
+        "pose_max_age": 0.4, "saliency_interval": 3,
+    },
+}
+
+
+class _ProfileDefault(Enum):
+    OMITTED = "profile-default"
+
+
+PROFILE_DEFAULT = _ProfileDefault.OMITTED
+
+
+def tracking_settings(args: object) -> dict[str, str | int | float]:
+    """Effective scheduling values for runtime summaries and collector identities.
+
+    Collector Namespaces may omit overrides or represent omitted values as None.
+    AppConfig instead resolves an explicit sentinel, so invalid explicit None
+    values remain visible to validate_config.
+    """
+    profile = getattr(args, "tracking_profile", "balanced")
+    if profile not in TRACKING_PROFILES:
+        raise ValueError("tracking-profile must be conservative, balanced, or fast")
+    settings = {"tracking_profile": profile}
+    for key, default in TRACKING_PROFILES[profile].items():
+        value = getattr(args, key, PROFILE_DEFAULT)
+        settings[key] = default if value is PROFILE_DEFAULT or value is None else value
+    settings["seg_skip_policy"] = getattr(args, "seg_skip_policy", None) or "primary"
+    return settings
+
+
 @dataclass
 class AppConfig:
     """CLI configuration plus resolved runtime values; no argparse crosses modules."""
@@ -65,8 +107,9 @@ class AppConfig:
     device: str = 'auto'
     seg_model: str = 'yolo26n-seg.pt'
     tracker: str = 'bytetrack.yaml'
-    seg_max_gap: int = 3
-    seg_max_age: float = 0.1
+    tracking_profile: str = 'balanced'
+    seg_max_gap: int | _ProfileDefault = PROFILE_DEFAULT
+    seg_max_age: float | _ProfileDefault = PROFILE_DEFAULT
     seg_thumbnail_mode: str = 'lazy'
     seg_thumbnail_method: str = 'gray-area'
     seg_skip_policy: str = 'primary'
@@ -120,12 +163,13 @@ class AppConfig:
     zoom_dead_zone: float = 0.04
     zoom_hold_seconds: float = 0.4
     fixed_zoom: float | None = None
-    cue_interval: float = 0.2
+    cue_interval: float | _ProfileDefault = PROFILE_DEFAULT
+    pose_max_age: float | _ProfileDefault = PROFILE_DEFAULT
     cue_top_k: int = 0
     temp_dir: str | None = None
     saliency_max_failures: int = 3
     retina_masks: bool = False
-    saliency_interval: int = 3
+    saliency_interval: int | _ProfileDefault = PROFILE_DEFAULT
     saliency_ema: float = 0.65
     saliency_amp: bool = True
     scene_method: str = 'inline'
@@ -142,6 +186,14 @@ class AppConfig:
     yolo_device: str = "cpu"
     runtime_fps: float = 30.0
     reference_dt: float = 1.0
+    legacy_flags: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.tracking_profile not in TRACKING_PROFILES:
+            raise ValueError("tracking-profile must be conservative, balanced, or fast")
+        for key, default in TRACKING_PROFILES[self.tracking_profile].items():
+            if getattr(self, key) is PROFILE_DEFAULT:
+                setattr(self, key, default)
 
 
 def validate_config(args: AppConfig) -> None:
@@ -169,6 +221,8 @@ def validate_config(args: AppConfig) -> None:
         raise ValueError("frame-processing must be reference or tensor")
     if args.frame_processing == "tensor" and args.video_decoder != "torchcodec":
         raise ValueError("tensor frame-processing requires --video-decoder torchcodec")
+    if args.tracking_profile not in TRACKING_PROFILES:
+        raise ValueError("tracking-profile must be conservative, balanced, or fast")
     if not isinstance(args.decode_device, str) or (args.decode_device != "cpu" and not (
             args.decode_device == "cuda" or (args.decode_device.startswith("cuda:")
                                             and args.decode_device[5:].isascii()
@@ -192,9 +246,16 @@ def validate_config(args: AppConfig) -> None:
     ):
         raise ValueError("seg-max-age must be finite and positive (video seconds)")
 
+    if (isinstance(args.saliency_interval, bool)
+            or not isinstance(args.saliency_interval, int) or args.saliency_interval < 1):
+        raise ValueError("saliency-interval must be an integer >= 1")
+    for key in ("cue_interval", "pose_max_age"):
+        value = getattr(args, key)
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise ValueError(f"{key.replace('_', '-')} must be finite and nonnegative")
     if (
-        args.saliency_interval < 1
-        or args.scene_downscale < 1
+        args.scene_downscale < 1
         or not 0 < args.saliency_ema <= 1
     ):
         raise ValueError("Invalid saliency interval/EMA or scene downscale")
@@ -225,7 +286,6 @@ def validate_config(args: AppConfig) -> None:
         "lost_hold_seconds",
         "subject_hold_seconds",
         "zoom_hold_seconds",
-        "cue_interval",
     ):
         value = getattr(args, key)
         if value is not None and (not math.isfinite(value) or value < 0):
@@ -304,4 +364,8 @@ def apply_preset(args: AppConfig) -> AppConfig:
         args.pan_speed_y = args.max_step_y * 30 / 1080
     if args.zoom_speed is None:
         args.zoom_speed = args.zoom_alpha * 30
+    if args.lost_hold_seconds is None:
+        args.lost_hold_seconds = args.max_missed_frames / 30.0
+    if args.subject_hold_seconds is None:
+        args.subject_hold_seconds = args.min_subject_hold_frames / 30.0
     return args
