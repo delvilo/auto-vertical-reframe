@@ -69,7 +69,10 @@ class InferenceRegion:
             if stats is not None:
                 stats = (stats[0], stats[1] + self.x, stats[2] + self.y, stats[3] + self.y)
             tracks.append(replace(track, box=box(track.box), mask_statistics=stats,
-                                  measured_at=context(track.measured_at) if track.measured_at else None))
+                                  measured_at=context(track.measured_at) if track.measured_at else None,
+                                  mask_evidence=(replace(track.mask_evidence,
+                                                        measured_at=context(track.mask_evidence.measured_at))
+                                                 if track.mask_evidence else None)))
         poses = {}
         for index, pose in observations.poses.items():
             cues = dict(pose.cues) if pose.cues is not None else None

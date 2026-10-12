@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 import numpy as np
@@ -12,6 +13,7 @@ from reframe.contracts import (CameraState, FrameContext, FrameObservations, Tra
 from reframe.geometry import box_iou
 from reframe.frame_pixels import TensorFrame
 from reframe.runtime import verify_yolo_device
+from reframe.perception.reliability import assess_pose, pose_motion
 
 def pose_owner(box, person_boxes) -> Optional[int]:
     """Match to segmentation rows, never to an independent pose tracker ID.
@@ -195,21 +197,76 @@ class YOLOPoseHelper:
 class PoseCueCache:
     """Batch expired tracks and remap cached head/body cues; never retain tensors."""
 
-    def __init__(self, helper, interval, fps, tracking_max_age=0.1):
+    def __init__(self, helper, interval, fps, tracking_max_age=0.1, *,
+                 pose_max_age=None, tracking_profile="conservative"):
         self.helper = helper
         self.interval = max(1, round(interval * fps))
         self.fps = fps
         self.tracking_max_age = tracking_max_age
+        self.pose_max_age = self.interval / fps if pose_max_age is None else pose_max_age
+        if not math.isfinite(self.pose_max_age) or self.pose_max_age < 0:
+            raise ValueError("pose_max_age must be finite and nonnegative")
+        if tracking_profile not in {"conservative", "balanced", "fast"}:
+            raise ValueError("Unknown pose tracking profile")
+        self.tracking_profile = tracking_profile
+        self._adaptive = tracking_profile != "conservative" and interval > 0
         self.cache = {}
         self.cache_hits = 0
         self.primary_only_frames = 0
         self.full_scan_frames = 0
         self.rois_skipped = 0
         self._previous_people: frozenset[int | None] | None = None
+        self.extension_hits = 0
+        self.extension_reasons: Counter[str] = Counter()
+        self.refresh_reasons: Counter[str] = Counter()
+        self.cache_age_bins: Counter[str] = Counter()
+        self._stable_measurements: dict[int, int] = {}
+        self._frame_people: tuple[TrackObservation, ...] = ()
+        self._frame_context: FrameContext | None = None
+        self._frame_state_safe = False
+        self._frame_identities_stable = False
 
     def clear(self):
         self.cache.clear()
         self._previous_people = None
+        self._stable_measurements.clear()
+        self._frame_people = ()
+        self._frame_context = None
+        self._frame_state_safe = self._frame_identities_stable = False
+
+    def telemetry(self):
+        """Cumulative counters, suitable for per-segment differences."""
+        return {"profile": self.tracking_profile, "soft_interval_frames": self.interval,
+                "hard_max_age_seconds": self.pose_max_age,
+                "extension_hits": self.extension_hits,
+                "extension_reasons": dict(self.extension_reasons),
+                "refresh_reasons": dict(self.refresh_reasons),
+                "cache_age_bins": dict(self.cache_age_bins)}
+
+    def prepare_frame(self, tracks, state: CameraState, context: FrameContext):
+        """Retain even unreliable/new people as blockers of extended reuse."""
+        people = tuple(track for track in tracks if track.cls_id == CLASS_IDS["person"])
+        previous = self._frame_context
+        if state.is_scene_cut or (previous is not None and (
+                context.frame_index <= previous.frame_index or context.timestamp <= previous.timestamp
+                or (previous.scene_index, previous.width, previous.height)
+                != (context.scene_index, context.width, context.height))):
+            self.clear()
+            previous = None
+        identities = frozenset(track.track_id for track in people)
+        self._frame_identities_stable = bool(
+            previous is not None and previous.frame_index + 1 == context.frame_index
+            and previous.timestamp < context.timestamp
+            and (previous.scene_index, previous.width, previous.height)
+            == (context.scene_index, context.width, context.height)
+            and identities == frozenset(track.track_id for track in self._frame_people)
+            and None not in identities)
+        self._frame_people, self._frame_context = people, context
+        self._frame_state_safe = not (state.is_scene_cut or state.missed_frames
+                                      or state.two_person_active_frames)
+        live = {track.track_id for track in people}
+        self._stable_measurements = {key: value for key, value in self._stable_measurements.items()
+                                     if key in live}
 
     def close(self):
         self.clear()
@@ -251,6 +308,7 @@ class PoseCueCache:
         if not locked:
             if state.frames_since_subject_switch < max(2, round(self.fps * 0.1)):
                 return None
+        if not locked or self._adaptive:
             def prominence(track):
                 x1, y1, x2, y2 = track.box
                 return track.confidence * max(0, x2 - x1) * max(0, y2 - y1)
@@ -271,7 +329,10 @@ class PoseCueCache:
         _, old, observation = previous
         measured = observation.inferred_at
         age = context.frame_index - measured.frame_index
-        max_age = self.interval if fresh else max(2, self.interval * 2)
+        # fresh=False only chooses which ROI to refresh first. It cannot
+        # authorize framing: get_many enforces the hard age before any reuse.
+        max_age = max(self.interval, math.ceil(self.pose_max_age * self.fps)) if fresh else max(
+            2, self.interval * 2, math.ceil(self.pose_max_age * self.fps))
         if (observation.track_id != primary.track_id
                 or measured.scene_index != context.scene_index
                 or (measured.width, measured.height) != (context.width, context.height)
@@ -279,16 +340,65 @@ class PoseCueCache:
                 or not 0 <= context.timestamp - measured.timestamp < max_age / self.fps
                 or not self.stable_box(old, primary.box, tolerance=0.1)):
             return False
-        points = observation.inferred_keypoints
-        if points is None or points.shape != (17, 3) or not (observation.cues or {}).get("has_pose"):
+        if not (observation.cues or {}).get("has_pose"):
             return False
-        threshold = max(0.5, self.helper.keypoint_conf)
-        x1, y1, x2, y2 = old
-        pw, ph = x2 - x1, y2 - y1
-        valid = (np.isfinite(points).all(axis=1) & (points[:, 2] >= threshold)
-                 & (points[:, 0] >= x1 - pw * 0.12) & (points[:, 0] <= x2 + pw * 0.12)
-                 & (points[:, 1] >= y1 - ph * 0.12) & (points[:, 1] <= y2 + ph * 0.12))
-        return bool(valid.sum() >= 6 and valid[[5, 6, 11, 12]].sum() >= 3)
+        if not assess_pose(observation.inferred_keypoints, old,
+                           self.helper.keypoint_conf).torso_reliable:
+            return False
+        if fresh:
+            elapsed = context.timestamp - measured.timestamp
+            if age == 0 and elapsed == 0:
+                return True
+            if self.pose_max_age == 0 or elapsed + 1e-9 >= self.pose_max_age:
+                return False
+            if age >= self.interval or elapsed + 1e-9 >= self.interval / self.fps:
+                return self._extension_reason(primary, old, observation, context) == "extended"
+        return True
+
+    def _extension_reason(self, track, old, observation, context):
+        """Extra lifetime needs new independent evidence, never a remapped mask."""
+        if not self._adaptive:
+            return "profile_disabled"
+        if self._frame_context != context or not self._frame_state_safe:
+            return "unsafe_frame"
+        if not self._frame_identities_stable:
+            return "identity_changed"
+        if track is None or not track.reliable_at(context, self.tracking_max_age):
+            return "tracking_unreliable"
+        if track.confidence < .5 or not self.stable_box(old, track.box, tolerance=.08):
+            return "track_motion"
+        if not assess_pose(observation.inferred_keypoints, old,
+                           self.helper.keypoint_conf).torso_reliable:
+            return "torso_unreliable"
+        if self._stable_measurements.get(track.track_id, 0) < 2:
+            return "pose_history_or_motion"
+        primary_area = max(1.0, (track.box[2] - track.box[0]) * (track.box[3] - track.box[1]))
+        width, height = track.box[2] - track.box[0], track.box[3] - track.box[1]
+        expanded = (track.box[0] - .15 * width, track.box[1] - .15 * height,
+                    track.box[2] + .15 * width, track.box[3] + .15 * height)
+        for other in self._frame_people:
+            if not other.reliable_at(context, self.tracking_max_age):
+                return "tracking_unreliable"
+            if other.track_id == track.track_id:
+                continue
+            if box_iou(expanded, other.box) > 0:
+                return "near_competitor"
+            area = max(0, other.box[2] - other.box[0]) * max(0, other.box[3] - other.box[1])
+            if other.confidence * area * 1.5 >= track.confidence * primary_area:
+                return "prominent_competitor"
+        evidence = getattr(track, "mask_evidence", None)
+        if evidence is None or not evidence.stable or evidence.observations < 2:
+            return "mask_unstable_or_missing"
+        measured = evidence.measured_at
+        age = context.timestamp - measured.timestamp
+        if (track.measured_at is None or measured != track.measured_at
+                or not math.isfinite(age) or not 0 <= age <= self.tracking_max_age + 1e-9
+                or measured.frame_index > context.frame_index
+                or (measured.scene_index, measured.width, measured.height)
+                != (context.scene_index, context.width, context.height)
+                or not math.isfinite(evidence.change) or not 0 <= evidence.change <= .08):
+            return "mask_stale_or_changed"
+        return "extended"
 
     @staticmethod
     def remap_cues(result, old, box):
@@ -316,23 +426,46 @@ class PoseCueCache:
     def get_many(self, frame, requests, person_boxes, context: FrameContext) -> dict[int, PoseObservation]:
         frame_idx = context.frame_index
         output, pending = {}, []
+        retention = max(2, self.interval * 2, math.ceil(self.pose_max_age * self.fps) + 1)
         self.cache = {key: value for key, value in self.cache.items()
-                      if 0 <= frame_idx - value[0] < max(2, self.interval * 2)}
+                      if 0 <= frame_idx - value[0] < retention}
+        current_tracks = {track.track_id: track for track in self._frame_people}
         for index, box, track_id in requests:
             previous = self.cache.get(track_id) if track_id is not None else None
             crowded = any(other != index and box_iou(box, other_box) > 0.35
                           for other, other_box in person_boxes.items())
+            reason = "missing_pose" if previous is None else "crowded"
             if previous is not None and not crowded:
                 at, old, result = previous
-                if (0 <= frame_idx - at < self.interval
+                age_frames = frame_idx - result.inferred_at.frame_index
+                age_seconds = context.timestamp - result.inferred_at.timestamp
+                consistent = (0 <= age_frames and 0 <= age_seconds
                         and result.inferred_at.scene_index == context.scene_index
                         and (result.inferred_at.width, result.inferred_at.height)
                         == (context.width, context.height)
-                        and 0 <= context.timestamp - result.inferred_at.timestamp < self.interval / self.fps
-                        and self.stable_box(old, box)):
+                        and result.track_id == track_id)
+                hard_fresh = (age_frames == 0 and age_seconds == 0) or (
+                    self.pose_max_age > 0 and age_seconds + 1e-9 < self.pose_max_age
+                    and age_frames < math.ceil(self.pose_max_age * self.fps))
+                soft_fresh = (age_frames < self.interval
+                              and age_seconds + 1e-9 < self.interval / self.fps)
+                reason = ("context_changed" if not consistent else
+                          "hard_age_expired" if not hard_fresh else
+                          "box_motion" if not self.stable_box(old, box) else "soft_age_expired")
+                reuse = consistent and hard_fresh and self.stable_box(old, box) and soft_fresh
+                if consistent and hard_fresh and not soft_fresh:
+                    reason = self._extension_reason(current_tracks.get(track_id), old, result, context)
+                    self.extension_reasons[reason] += 1
+                    reuse = reason == "extended"
+                    if reuse:
+                        self.extension_hits += 1
+                if reuse:
                     output[index] = self.remap_observation(result, old, box, context)
                     self.cache_hits += 1
+                    bin_index = min(4, int((age_seconds + 1e-9) * 10))
+                    self.cache_age_bins[("0-0.1s", "0.1-0.2s", "0.2-0.3s", "0.3-0.4s", "0.4s+")[bin_index]] += 1
                     continue
+            self.refresh_reasons[reason] += 1
             pending.append((index, box, track_id))
         if pending:
             detections = self.helper.detect_many(frame, pending, person_boxes)
@@ -345,9 +478,29 @@ class PoseCueCache:
             output.update(fresh)
             for index, box, track_id in pending:
                 if track_id is not None:
+                    previous = self.cache.get(track_id)
+                    measured = fresh[index]
+                    stable = False
+                    if previous is not None:
+                        _, old, before = previous
+                        old_context = before.inferred_at
+                        elapsed = context.timestamp - old_context.timestamp
+                        if (old_context.scene_index == context.scene_index
+                                and (old_context.width, old_context.height) == (context.width, context.height)
+                                and 0 < elapsed <= max(self.pose_max_age, self.interval / self.fps) + 1e-9
+                                and 0 < context.frame_index - old_context.frame_index
+                                and self.stable_box(old, box, tolerance=.08)):
+                            motion = pose_motion(before.inferred_keypoints, old,
+                                                 measured.inferred_keypoints, box,
+                                                 self.helper.keypoint_conf)
+                            stable = motion.torso_displacement <= .10 and motion.limb_displacement <= .18
+                    self._stable_measurements[track_id] = min(
+                        3, self._stable_measurements.get(track_id, 1) + 1) if stable else 1
                     self.cache[track_id] = (frame_idx, box, fresh[index])
             while len(self.cache) > 128:
-                self.cache.pop(next(iter(self.cache)))
+                removed = next(iter(self.cache))
+                self.cache.pop(removed)
+                self._stable_measurements.pop(removed, None)
         return output
 
     @classmethod
@@ -367,6 +520,8 @@ def observe_poses(frame: np.ndarray, tracks: tuple[TrackObservation, ...],
                   cue_top_k: int = 0, tracking_max_age: float | None = None) -> FrameObservations:
     if tracking_max_age is None:
         tracking_max_age = helper.tracking_max_age if isinstance(helper, PoseCueCache) else 0.1
+    if isinstance(helper, PoseCueCache):
+        helper.prepare_frame(tracks, state, context)
     tracks = tuple(track for track in tracks if track.reliable_at(context, tracking_max_age))
     people = [track for track in tracks if track.cls_id == CLASS_IDS["person"]]
     person_boxes = {track.row_index: track.box for track in people}

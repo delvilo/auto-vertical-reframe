@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 from reframe.precrop import InferenceRegion
-from reframe.contracts import FrameObservations, TrackObservation, PoseObservation, CameraState
+from reframe.contracts import FrameObservations, TrackObservation, PoseObservation, CameraState, MaskEvidence
 from reframe.subjects import build_candidates, SubjectRankingModel
 from reframe.saliency.regions import extract_saliency_region
 from reframe.camera import build_global_saliency_observation
@@ -72,6 +72,23 @@ class PrecropTests(unittest.TestCase):
         observation = build_global_saliency_observation(saliency, 135, 240, 400, 240, 1, 1.85,
                                                        saliency_bounds=bounds)
         self.assertGreater(observation.center_x, 270)
+
+    def test_mask_evidence_changes_geometry_without_refreshing_measurement(self):
+        for mode in ("left", "middle", "right"):
+            with self.subTest(mode=mode):
+                region = InferenceRegion.from_frame(400, 240, mode)
+                original = self.observations(region)
+                measured = replace(original.frame, frame_index=5, timestamp=.4)
+                evidence = MaskEvidence(measured, True, 3, .02)
+                track = replace(original.tracks[0], measured_at=measured, source="predicted",
+                                mask_evidence=evidence)
+                mapped = region.to_source(replace(original, tracks=(track,))).tracks[0]
+                self.assertEqual(mapped.mask_evidence.measured_at, replace(measured, width=400))
+                self.assertEqual(mapped.measured_at, mapped.mask_evidence.measured_at)
+                self.assertEqual(mapped.mask_evidence.observations, 3)
+                self.assertEqual(mapped.mask_evidence.change, .02)
+                self.assertEqual(track.mask_evidence.measured_at.width, 200)
+                self.assertEqual(mapped.source, "predicted")
 
     def test_pose_only_candidate_does_not_gain_fake_saliency_evidence(self):
         region = InferenceRegion.from_frame(400, 240, "right")

@@ -10,9 +10,10 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 from reframe.config import AppConfig
-from reframe.contracts import FrameContext, FrameObservations, TrackObservation
+from reframe.contracts import FrameContext, FrameObservations, MaskEvidence, TrackObservation
 from reframe.frame_pixels import TensorFrame
 from reframe.perception.motion import SparseMotion
+from reframe.perception.reliability import assess_pose, pose_motion
 from reframe.runtime import torch, verify_yolo_device
 
 def mask_statistics(masks, indices: list[int], frame_shape: tuple[int, int]) -> dict:
@@ -134,6 +135,10 @@ class SegmentationTracker:
         self._counts = Counter()
         self._reasons = Counter()
         self._gate_diagnostics = Counter()
+        self._mask_counts = Counter()
+        self._pose_counts = Counter()
+        self._interval_counts = Counter()
+        self._age_counts = Counter()
         self._timings = dict.fromkeys(("thumbnail", "scheduler", "frame_change", "model_track",
                                       "parse_masks", "flow", "predict", "bookkeeping"), 0.0)
         self._total_seconds = 0.0
@@ -153,6 +158,94 @@ class SegmentationTracker:
         self._interval = 1
         self._force = None
         self._primary_id = None
+        self._secondary_relief = set()
+        self._measurement_counts = {}
+        self._pose_feedback = None
+        self._pose_reference = None
+        self._pose_stable_measurements = 0
+
+    def _gap_limit(self):
+        """The seconds budget remains independent of the requested frame gap."""
+        seconds_limit = max(1, math.floor(self.config.seg_max_age * self.config.runtime_fps + 1e-9))
+        profile_limit = 3 if getattr(self.config, "tracking_profile", "balanced") == "conservative" else self.config.seg_max_gap
+        return min(self.config.seg_max_gap, profile_limit, seconds_limit)
+
+    @staticmethod
+    def _mask_geometry(track):
+        if track.mask_statistics is None:
+            return None
+        box = np.asarray(track.box, dtype=float)
+        stats = np.asarray(track.mask_statistics, dtype=float)
+        size = box[2:] - box[:2]
+        if (stats.shape != (4,) or not np.isfinite(stats).all()
+                or not np.isfinite(box).all() or np.any(size <= 0)):
+            return None
+        normalized = np.array((stats[0] / np.prod(size), (stats[1] - box[0]) / size[0],
+                               (stats[2] - box[1]) / size[1], (stats[3] - box[1]) / size[1]))
+        if (not .02 <= normalized[0] <= 1.25 or np.any(normalized[1:] < -.12)
+                or np.any(normalized[1:] > 1.12) or stats[3] > stats[2]):
+            return None
+        return normalized
+
+    def _mask_evidence(self, tracks, context):
+        previous = {t.track_id: t for t in self._measured if t.track_id is not None}
+        output = []
+        counts = {}
+        for track in tracks:
+            old = previous.get(track.track_id)
+            old_context = old.measured_at if old is not None else None
+            contiguous = (old_context is not None and track.track_id is not None
+                          and old_context.scene_index == context.scene_index
+                          and (old_context.width, old_context.height) == (context.width, context.height)
+                          and 0 < context.frame_index - old_context.frame_index
+                          and 0 < context.timestamp - old_context.timestamp <= self.config.seg_max_age + 1e-9)
+            counts[track.track_id] = self._measurement_counts.get(track.track_id, 0) + 1 if contiguous else 1
+            geometry = self._mask_geometry(track)
+            if geometry is None:
+                self._mask_counts["missing_or_invalid"] += 1
+                output.append(replace(track, mask_evidence=None))
+                continue
+            old_geometry = self._mask_geometry(old) if contiguous else None
+            change = float(np.max(np.abs(geometry - old_geometry))) if old_geometry is not None else 1.0
+            compatible = old_geometry is not None and change <= .08
+            observations = (old.mask_evidence.observations + 1
+                            if compatible and old.mask_evidence is not None else 1)
+            evidence = MaskEvidence(context, compatible and observations >= 2, observations, change)
+            self._mask_counts["stable" if evidence.stable else "changed_or_initial"] += 1
+            output.append(replace(track, mask_evidence=evidence))
+        self._measurement_counts = counts
+        return tuple(output)
+
+    def _fresh_mask(self, track, context):
+        evidence = track.mask_evidence
+        if evidence is None:
+            return False
+        measured = evidence.measured_at
+        age = context.timestamp - measured.timestamp
+        return (evidence.stable and evidence.observations >= 2
+                and math.isfinite(evidence.change) and 0 <= evidence.change <= .08
+                and measured == track.measured_at
+                and 0 <= age <= self.config.seg_max_age + 1e-9
+                and 0 <= context.frame_index - measured.frame_index
+                and (context.scene_index, context.width, context.height)
+                == (measured.scene_index, measured.width, measured.height))
+
+    def _extension_safe(self, context, tracks=None):
+        primary = next((t for t in (tracks if tracks is not None else self._tracks)
+                        if t.track_id == self._primary_id), None)
+        pose = self._pose_feedback
+        if (primary is None or primary.cls_id != 0 or not primary.reliable_at(context, self.config.seg_max_age)
+                or not self._fresh_mask(primary, context) or pose is None
+                or self._pose_stable_measurements < 2 or pose.track_id != primary.track_id):
+            return False
+        age = context.timestamp - pose.inferred_at.timestamp
+        max_age = getattr(self.config, "pose_max_age", None)
+        if max_age is None:
+            max_age = self.config.cue_interval
+        return (math.isfinite(age) and 0 <= age <= max_age + 1e-9
+                and context.frame_index >= pose.inferred_at.frame_index
+                and (context.scene_index, context.width, context.height)
+                == (pose.inferred_at.scene_index, pose.inferred_at.width, pose.inferred_at.height))
 
     def reset(self) -> None:
         predictor = getattr(self.model, "predictor", None)
@@ -245,7 +338,8 @@ class SegmentationTracker:
                                np.maximum(mean[:2], end[:2]) + size / 2 + margin))
 
     def _unsettled_detail(self, native):
-        """Allow only distant lost bystanders; every observed track stays guarded."""
+        """Guard primary/entrants; isolate only small, distant established bystanders."""
+        self._secondary_relief = set()
         if getattr(self.config, "seg_skip_policy", "primary") == "all":
             if native.lost_stracks:
                 return "all_lost_tracks"
@@ -276,9 +370,9 @@ class SegmentationTracker:
             return "secondary_new_or_unreported"
         if observed_ids - by_id.keys():
             return "secondary_missing"
-        if not native.lost_stracks:
+        if not native.lost_stracks and len(native.tracked_stracks) == 1:
             return None
-        horizon = min(self.config.seg_max_gap, 3)
+        horizon = self._gap_limit()
         primary_envelope = self._motion_envelope(primary, horizon)
         if primary_envelope is None:
             return "primary_uncertain_motion"
@@ -292,9 +386,40 @@ class SegmentationTracker:
             if np.all(np.minimum(envelope[2:], primary_envelope[2:])
                       >= np.maximum(envelope[:2], primary_envelope[:2])):
                 return "secondary_lost_near_primary"
+            area = float(np.prod(np.asarray(track.xyxy)[2:] - np.asarray(track.xyxy)[:2]))
+            if (getattr(self.config, "tracking_profile", "balanced") != "conservative"
+                    and (area >= .35 * np.prod(primary_box[2:] - primary_box[:2])
+                         or (self._previous is not None
+                             and area >= .04 * self._previous.width * self._previous.height))):
+                return "secondary_lost_prominent"
         # Counts eligible scheduler visits, not lost objects or actual skips:
         # frame-change, age, confidence and full observed-track flow still run.
-        self._gate_diagnostics["distant_lost_allowed"] += 1
+        if native.lost_stracks:
+            self._gate_diagnostics["distant_lost_allowed"] += 1
+        if getattr(self.config, "tracking_profile", "balanced") != "conservative":
+            area = float(np.prod(primary_box[2:] - primary_box[:2]))
+            observed = {t.track_id: t for t in self._tracks}
+            frame_area = self._previous.width * self._previous.height if self._previous else float("inf")
+            for track in native.tracked_stracks:
+                if track.track_id == self._primary_id:
+                    continue
+                # The first real sighting always gets another detector pass;
+                # saliency and primary choice retain the entire scene's tracks.
+                if self._measurement_counts.get(track.track_id, 0) < 2:
+                    return "secondary_new_measurement"
+                box = np.asarray(observed[track.track_id].box)
+                secondary_area = float(np.prod(box[2:] - box[:2]))
+                if secondary_area >= .35 * area or secondary_area >= .04 * frame_area:
+                    self._gate_diagnostics["secondary_prominent_guarded"] += 1
+                    continue
+                envelope = self._motion_envelope(track, horizon)
+                if envelope is None or np.all(np.minimum(envelope[2:], primary_envelope[2:])
+                                               >= np.maximum(envelope[:2], primary_envelope[:2])):
+                    self._gate_diagnostics["secondary_near_or_uncertain_guarded"] += 1
+                    continue
+                self._secondary_relief.add(track.track_id)
+            if self._secondary_relief:
+                self._gate_diagnostics["distant_visible_allowed"] += 1
         return None
 
     def _metadata_reason(self):
@@ -315,14 +440,21 @@ class SegmentationTracker:
     def _refresh_reason(self, context, native):
         # Keep these AFTER the image-change check. A frame change resets measured
         # stability, whereas a scheduled/age refresh can preserve it.
-        if any(t.confidence < .45 for t in self._tracks):
+        if any(t.confidence < .45 for t in self._tracks if t.track_id not in self._secondary_relief):
             return "low_confidence"
         age = context.timestamp - self._measured_context.timestamp
         if age >= self.config.seg_max_age - 1e-9:
             return "age_limit"
+        # A cached torso expiring during a long interval caps that interval at
+        # the proven three-frame path, without forcing one-frame detection.
+        if self._interval > 3 and not self._extension_safe(context):
+            self._interval = 3
+            self._gate_diagnostics["extension_evidence_expired"] += 1
         if context.frame_index - self._measured_context.frame_index >= self._interval:
             return "scheduled"
         for track in native.tracked_stracks:
+            if track.track_id in self._secondary_relief:
+                continue
             if (not np.isfinite(track.mean).all() or not np.isfinite(track.covariance).all()
                     or np.sqrt(np.maximum(0, np.diag(track.covariance)[:2])).max()
                     > .5 * min(track.xyxy[2:] - track.xyxy[:2])):
@@ -330,11 +462,41 @@ class SegmentationTracker:
         return None
 
     def _update_stability(self, tracks, context):
+        if self._secondary_relief:
+            # A new detector result may make a previously small/distant person
+            # prominent or close. Never exempt it using the previous boxes.
+            native = self._native()
+            by_id = {t.track_id: t for t in native.tracked_stracks} if native is not None else {}
+            primary = by_id.get(self._primary_id)
+            envelope = self._motion_envelope(primary, self._gap_limit()) if primary is not None else None
+            if envelope is None:
+                self._secondary_relief.clear()
+            else:
+                primary_box = np.asarray(primary.xyxy)
+                primary_area = float(np.prod(primary_box[2:] - primary_box[:2]))
+                guard = .5 * (primary_box[2:] - primary_box[:2])
+                envelope += np.concatenate((-guard, guard))
+                low_risk = set()
+                for track in tracks:
+                    if track.track_id not in self._secondary_relief:
+                        continue
+                    box = np.asarray(track.box)
+                    area = float(np.prod(box[2:] - box[:2]))
+                    secondary = by_id.get(track.track_id)
+                    projected = self._motion_envelope(secondary, self._gap_limit()) if secondary is not None else None
+                    if (area < .35 * primary_area and area < .04 * context.width * context.height
+                            and projected is not None
+                            and not np.all(np.minimum(projected[2:], envelope[2:])
+                                           >= np.maximum(projected[:2], envelope[:2]))):
+                        low_risk.add(track.track_id)
+                self._secondary_relief = low_risk
         previous = {t.track_id: t for t in self._measured}
         stable = (bool(tracks) and None not in previous
                   and {t.track_id for t in tracks} == previous.keys())
         if stable:
             for track in tracks:
+                if track.track_id in self._secondary_relief:
+                    continue
                 old = np.asarray(previous[track.track_id].box)
                 new = np.asarray(track.box)
                 size = np.maximum(old[2:] - old[:2], 1)
@@ -345,7 +507,11 @@ class SegmentationTracker:
         if not stable or self._stable_since is None:
             self._stable_since = context.timestamp
         duration = context.timestamp - self._stable_since
-        self._interval = min(self.config.seg_max_gap, 3 if duration >= .25 else 2 if duration >= .1 else 1)
+        interval = 3 if duration >= .25 else 2 if duration >= .1 else 1
+        if self._gap_limit() > 3 and self._extension_safe(context, tracks):
+            extended_after = .5 if getattr(self.config, "tracking_profile", "balanced") == "fast" else 1.0
+            interval = 6 if duration >= extended_after else 4 if duration >= .5 else interval
+        self._interval = min(self._gap_limit(), interval)
         self._max_interval = max(self._max_interval, self._interval)
         self._measured, self._measured_context = tracks, context
 
@@ -365,9 +531,17 @@ class SegmentationTracker:
         by_id = {t.track_id: t for t in native.tracked_stracks}
         output = []
         for track in self._tracks:
-            dx, dy, quality = proposals[track.track_id]
             x1, y1, x2, y2 = track.box
             native_track = by_id[track.track_id]
+            if track.track_id in proposals:
+                dx, dy, quality = proposals[track.track_id]
+            elif track.track_id in self._secondary_relief:
+                # This bystander did not pass optical flow. Preserve its native
+                # prediction but explicitly withhold reliable tracking status.
+                dx, dy = native_track.mean[:2] - ((x1 + x2) / 2, (y1 + y2) / 2)
+                quality = .65
+            else:
+                raise ValueError("Missing flow proposal for a guarded track")
             native_track.mean[:2] = ((x1 + x2) / 2 + dx, (y1 + y2) / 2 + dy)
             stats = track.mask_statistics
             if stats is not None:
@@ -375,6 +549,8 @@ class SegmentationTracker:
             output.append(replace(track, box=(x1 + dx, y1 + dy, x2 + dx, y2 + dy),
                                   mask_statistics=stats, source="predicted",
                                   prediction_confidence=min(track.prediction_confidence, quality)))
+        if self._secondary_relief:
+            self._counts["secondary_prediction_frames"] += 1
         return tuple(output)
 
     def track(self, frame: np.ndarray, context: FrameContext | None = None) -> tuple[TrackObservation, ...]:
@@ -383,7 +559,15 @@ class SegmentationTracker:
         started = time.perf_counter()
         before = sum(self._timings.values())
         try:
-            return self._track(frame, context)
+            tracks = self._track(frame, context)
+            self._interval_counts[str(self._interval)] += 1
+            observed_context = self._previous
+            for track in tracks:
+                if track.measured_at is not None:
+                    age = observed_context.timestamp - track.measured_at.timestamp
+                    bucket = "0" if age <= 1e-9 else "0-.05" if age < .05 - 1e-9 else ".05-.1" if age <= .1 + 1e-9 else "over_.1"
+                    self._age_counts[bucket] += 1
+            return tracks
         finally:
             elapsed = time.perf_counter() - started
             measured = sum(self._timings.values()) - before
@@ -427,7 +611,8 @@ class SegmentationTracker:
             if reason is None:
                 self._counts["flow_attempts"] += 1
                 proposals, reason = self._timed("flow", self.motion.estimate, self._gray, gray,
-                                               self._tracks, context.width, context.height)
+                                               tuple(t for t in self._tracks if t.track_id not in self._secondary_relief),
+                                               context.width, context.height)
                 if reason is None and any(v[2] < .7 for v in proposals.values()):
                     reason = "flow_low_quality"
                 if reason is None:
@@ -455,6 +640,7 @@ class SegmentationTracker:
         tracks = tuple(replace(t, measured_at=context) for t in
                        self._timed("parse_masks", parse_tracks, result, frame.shape[:2],
                                    self.allowed_class_ids))
+        tracks = self._timed("scheduler", self._mask_evidence, tracks, context)
         self._counts["detector_calls"] += 1
         self._timed("scheduler", self._update_stability, tracks, context)
         self._remember(frame, context, tracks, gray)
@@ -464,19 +650,51 @@ class SegmentationTracker:
         return tracks
 
     def feedback(self, observations: FrameObservations, preferred_track_id: int | None = None) -> None:
-        """Weak fresh primary pose requests a refresh; cached pose cannot raise interval."""
+        """Pose authorizes longer gaps; weak pose alone cannot invalidate real masks."""
         if self._primary_id is not None and preferred_track_id != self._primary_id:
             self._force = "primary_changed"
+            self._pose_reference = None
+            self._pose_stable_measurements = 0
         self._primary_id = preferred_track_id
+        self._pose_feedback = None
         primary = next((t for t in observations.tracks if t.track_id == preferred_track_id), None)
         if preferred_track_id is not None and primary is None:
             self._force = "primary_missing"
+            self._pose_counts["primary_missing"] += 1
         elif primary is not None and primary.cls_id == 0:
             pose = observations.poses.get(primary.row_index)
-            if (pose is not None and pose.source == "inferred"
-                    and pose.inferred_at == observations.frame
-                    and (not pose.cues or not pose.cues.get("has_pose"))):
-                self._force = "weak_primary_pose"
+            reliable = (pose is not None and pose.track_id == primary.track_id
+                        and pose.frame == observations.frame
+                        and pose.source in {"inferred", "remapped"}
+                        and primary.reliable_at(observations.frame, self.config.seg_max_age)
+                        and pose.cues and pose.cues.get("has_pose")
+                        and assess_pose(pose.keypoints, primary.box, self.config.keypoint_conf).torso_reliable)
+            if reliable:
+                actual = pose.source == "inferred" and pose.inferred_at == observations.frame
+                if actual:
+                    previous = self._pose_reference
+                    compatible = False
+                    if previous is not None and previous[0].track_id == primary.track_id:
+                        movement = pose_motion(previous[0].keypoints, previous[1], pose.keypoints,
+                                               primary.box, self.config.keypoint_conf)
+                        compatible = (movement.torso_common >= 3 and movement.torso_displacement <= .06
+                                      and movement.limb_displacement <= .12)
+                    self._pose_stable_measurements = self._pose_stable_measurements + 1 if compatible else 1
+                    self._pose_reference = (pose, primary.box)
+                self._pose_feedback = pose
+                self._pose_counts["reliable_torso"] += 1
+            else:
+                self._pose_counts["weak_or_missing_pose"] += 1
+                self._pose_stable_measurements = 0
+                self._pose_reference = None
+                if (pose is not None and pose.source == "inferred"
+                        and pose.inferred_at == observations.frame
+                        and (getattr(self.config, "tracking_profile", "balanced") == "conservative"
+                             or not self._fresh_mask(primary, observations.frame))):
+                    self._force = "weak_primary_pose"
+                    self._pose_counts["weak_pose_and_mask_refresh"] += 1
+            if not self._extension_safe(observations.frame, observations.tracks):
+                self._interval = min(self._interval, 3)
 
     def telemetry(self) -> dict:
         return {"detector_calls": self._counts["detector_calls"],
@@ -494,6 +712,12 @@ class SegmentationTracker:
                 "max_prediction_age_seconds": self._max_age,
                 "max_interval": self._max_interval,
                 "skip_policy": getattr(self.config, "seg_skip_policy", "primary"),
+                "tracking_profile": getattr(self.config, "tracking_profile", "balanced"),
+                "mask_evidence_counts": dict(self._mask_counts),
+                "pose_feedback_counts": dict(self._pose_counts),
+                "measurement_age_counts": dict(self._age_counts),
+                "interval_counts": dict(self._interval_counts),
+                "secondary_prediction_frames": self._counts["secondary_prediction_frames"],
                 "gate_diagnostics": dict(self._gate_diagnostics),
                 "refresh_reasons": dict(self._reasons)}
 

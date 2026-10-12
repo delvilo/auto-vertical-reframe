@@ -196,7 +196,7 @@ class PredictorTests(unittest.TestCase):
 
 class CacheTests(unittest.TestCase):
     def setUp(self):
-        self.helper = MagicMock()
+        self.helper = MagicMock(keypoint_conf=.35)
         self.cues = app.pose_cues(skeleton(), (100, 20, 200, 220), (240, 400), .35)
         self.helper.detect_many.side_effect = lambda frame, req, people: {i: PoseDetection(skeleton(), self.cues) if self.cues else None for i, _, _ in req}
         self.cache = app.PoseCueCache(self.helper, .2, 60)

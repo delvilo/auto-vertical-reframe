@@ -121,6 +121,7 @@ class PrimarySkipPolicyTests(unittest.TestCase):
         observation = replace(primary, row_index=1, track_id=secondary.track_id,
                               box=tuple(secondary.xyxy), mask_statistics=None)
         self.tracker._tracks += (observation,)
+        self.tracker._measurement_counts[secondary.track_id] = 2
         self.assertIsNone(self.tracker._unsettled_detail(self.fake.tracker))
         measured_frame = secondary.frame_id
         predicted = self.tracker._predict({primary.track_id: (1., 0., .9),

@@ -15,6 +15,6 @@ def build_saliency_helper(args: AppConfig) -> CascadeSaliencyService:
         lock_first_subject=args.lock_first_subject,
         two_person_framing=args.two_person_framing,
         keypoint_conf=args.keypoint_conf,
-        pose_max_age=max(args.cue_interval, 1 / max(args.runtime_fps, 1)),
+        pose_max_age=args.pose_max_age,
         tracking_max_age=args.seg_max_age,
     )

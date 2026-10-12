@@ -16,12 +16,13 @@ SEGMENT_SCHEMA_VERSION = 1
 FRAME_PHASES = ("decode", "scene", "segmentation", "pose", "feedback", "saliency",
                 "subjects", "camera", "render_write", "bookkeeping")
 SEG_COUNTERS = ("thumbnail_builds", "thumbnail_cache_hits", "thumbnail_backfills",
-                "thumbnail_deferred_frames", "flow_attempts")
+                "thumbnail_deferred_frames", "flow_attempts", "secondary_prediction_frames")
 SALIENCY_COUNTERS = ("frames_total", "frames_backend", "frames_fallback", "prediction_requests",
                      "actual_forward_calls", "observed_frames", "sample_frames_total",
                      "sample_refreshes", "sample_propagated", "deepgaze_requests",
                      "handcrafted_predictions", "cache_hits", "tier_transitions",
-                     "tier_pose_only_frames", "tier_handcrafted_frames", "tier_deepgaze_frames")
+                     "tier_pose_only_frames", "tier_handcrafted_frames", "tier_deepgaze_frames",
+                     "risk_escalations", "cooldown_bypasses")
 POSE_COUNTERS = ("rois_inferred", "rois_matched", "cache_hits", "primary_only_frames",
                  "full_scan_frames", "rois_skipped")
 
@@ -32,15 +33,21 @@ def counter_snapshot(stats: dict, segmentation: dict, saliency: dict, pose: Any,
     result = {key: value for key, value in stats.items() if key != "frames_processed"}
     for name in SEG_COUNTERS:
         result[f"seg_{name}"] = segmentation.get(name, 0)
-    for name in ("refresh_reasons", "gate_diagnostics", "timing_seconds"):
+    for name in ("refresh_reasons", "gate_diagnostics", "timing_seconds", "mask_evidence_counts",
+                 "pose_feedback_counts", "measurement_age_counts", "interval_counts"):
         result[f"seg_{name}"] = dict(segmentation.get(name, {}))
     for name in SALIENCY_COUNTERS:
         result[f"saliency_{name}"] = saliency.get(name, 0)
-    for name in ("tier_reasons", "timing_seconds", "deepgaze_timing_seconds"):
+    for name in ("tier_reasons", "timing_seconds", "deepgaze_timing_seconds", "risk_reasons",
+                 "pose_reliability_reasons"):
         result[f"saliency_{name}"] = dict(saliency.get(name, {}))
     for name in POSE_COUNTERS:
         owner = pose.helper if pose is not None and name.startswith("rois_") and name != "rois_skipped" else pose
         result[f"pose_{name}"] = getattr(owner, name) if owner is not None else 0
+    pose_diagnostics = dict(pose.telemetry()) if pose is not None and hasattr(pose, "telemetry") else {}
+    result["pose_extension_hits"] = pose_diagnostics.get("extension_hits", 0)
+    for name in ("extension_reasons", "cache_age_bins", "refresh_reasons"):
+        result[f"pose_{name}"] = dict(pose_diagnostics.get(name, {}))
     result["pipeline_timing_seconds"] = {key: pipeline_seconds[key] for key in FRAME_PHASES}
     return result
 

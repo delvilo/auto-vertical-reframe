@@ -12,7 +12,7 @@ import numpy as np
 
 from reframe import cli, config, pipeline
 from reframe.contracts import FrameObservations
-from reframe.segments import FRAME_PHASES, SegmentStats
+from reframe.segments import FRAME_PHASES, SegmentStats, counter_snapshot
 from reframe.timing import PhaseTimings
 
 
@@ -99,6 +99,45 @@ class SegmentStatsTests(unittest.TestCase):
     def test_cpu_reporting_module_has_no_heavy_imports(self):
         program = "import sys; import reframe.segments; assert not {'torch','cv2','numpy','ultralytics'} & sys.modules.keys()"
         subprocess.run([sys.executable, "-c", program], check=True)
+
+    def test_adaptive_evidence_histograms_conserve_across_scene_boundary(self):
+        pose_counts = {"extension_hits": 0, "extension_reasons": {}, "cache_age_bins": {},
+                       "refresh_reasons": {}}
+        pose = SimpleNamespace(helper=SimpleNamespace(rois_inferred=0, rois_matched=0),
+                               cache_hits=0, primary_only_frames=0, full_scan_frames=0,
+                               rois_skipped=0, telemetry=lambda: pose_counts.copy())
+        seg = {"mask_evidence_counts": {}, "measurement_age_counts": {}, "pose_feedback_counts": {},
+               "interval_counts": {}, "secondary_prediction_frames": 0}
+        saliency = {"risk_escalations": 0, "cooldown_bypasses": 0,
+                    "risk_reasons": {}, "pose_reliability_reasons": {}}
+        phases = dict.fromkeys(FRAME_PHASES, 0.)
+        capture = lambda: counter_snapshot({}, seg, saliency, pose, phases)
+        stats = SegmentStats(30., 5., capture())
+        rows = []
+        for index in (1, 2):
+            pose_counts["extension_hits"] = index
+            pose_counts["extension_reasons"] = {"extended": index}
+            pose_counts["cache_age_bins"] = {"0.2-0.3s": index}
+            pose_counts["refresh_reasons"] = {"hard_expired": index}
+            seg["mask_evidence_counts"] = {"stable": index}
+            seg["measurement_age_counts"] = {"0-.05": index}
+            seg["interval_counts"] = {"6": index}
+            seg["pose_feedback_counts"] = {"reliable_torso": index}
+            seg["secondary_prediction_frames"] = index
+            saliency.update(risk_escalations=index, cooldown_bypasses=index,
+                            risk_reasons={"new_subject": index},
+                            pose_reliability_reasons={"torso_without_face": index})
+            stats.record_frame(index, index, decision(index, interval=6))
+            rows.append(stats.finish(capture(), "scene" if index == 1 else "end"))
+        final = capture()
+        for key, value in final.items():
+            if isinstance(value, dict):
+                for category, count in value.items():
+                    self.assertEqual(sum(row[key].get(category, 0) for row in rows), count)
+            else:
+                self.assertEqual(sum(row[key] for row in rows), value)
+        self.assertEqual(rows[1]["pose_extension_hits"], 1)
+        json.dumps(rows, allow_nan=False)
 
     def test_phase_snapshot_does_not_advance_accumulator(self):
         timer = PhaseTimings(("setup", "work"), "setup", 10.)

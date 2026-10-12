@@ -132,12 +132,75 @@ class CascadeTests(unittest.TestCase):
 
     def test_motion_invalidates_cache_and_cooldown_returns_current_cheap_map(self):
         self.process(1)
-        bright = np.full_like(self.frame, 200)
+        # Moderate change invalidates alignment without creating an urgent event.
+        bright = np.full_like(self.frame, 20)
         result = self.process(2, frame=bright)
         self.assertEqual((result.backend, result.reason), ("handcrafted", "neural_cooldown"))
         result = self.process(4, frame=bright)
         self.assertEqual(result.backend, "deepgazemr")
         self.assertEqual(result.inferred_at.frame_index, 4)
+
+    def test_severe_change_bypasses_cooldown_only_on_new_risk(self):
+        self.process(1)
+        result = self.process(2, frame=np.full_like(self.frame, 200))
+        self.assertEqual(result.backend, "deepgazemr")
+        self.assertEqual(result.inferred_at.frame_index, 2)
+        self.assertEqual(self.service.telemetry()["cooldown_bypasses"], 1)
+        result = self.process(3, frame=np.full_like(self.frame, 50))
+        self.assertEqual((result.backend, result.reason), ("handcrafted", "neural_cooldown"))
+        self.assertEqual(self.deep.calls, 2)
+        self.assertEqual(self.service.telemetry()["risk_reasons"]["severe_image_change"], 1)
+
+    def test_three_valid_torso_points_survive_missing_face_and_bad_hands(self):
+        for index in range(1, 9):
+            obs = person_observations(index)
+            points = obs.poses[0].keypoints.copy()
+            points[12, 2] = .1  # One hip hidden, the other three torso points agree.
+            points[9] = [200 * index, -500, .1]
+            points[10] = [np.nan, np.nan, .9]
+            obs = replace(obs, poses={0: replace(obs.poses[0], keypoints=points)})
+            result = self.process(index, obs)
+        self.assertEqual(result.source, "pose_only")
+        self.assertEqual(self.deep.calls, 0)
+        evidence = self.service.telemetry()["pose_reliability_reasons"]
+        self.assertGreater(evidence["torso_without_face"], 0)
+        self.assertGreater(evidence["torso_with_partial_limbs"], 0)
+
+    def test_reliable_large_limb_motion_rechecks_framing_without_rejecting_torso(self):
+        for index in range(1, 6):
+            obs = person_observations(index)
+            points = obs.poses[0].keypoints.copy()
+            points[9] = [45 if index < 5 else 70, 30, .9]
+            points[10] = [75, 30, .9]
+            obs = replace(obs, poses={0: replace(obs.poses[0], keypoints=points)})
+            result = self.process(index, obs)
+            if index == 4:
+                self.assertEqual(result.source, "pose_only")
+        self.assertEqual(result.backend, "handcrafted")
+        self.assertEqual(self.deep.calls, 0)
+        self.assertGreater(self.service.telemetry()["pose_reliability_reasons"]["reliable_limb_motion"], 0)
+
+    def test_collapsed_high_confidence_body_geometry_cannot_validate_pose(self):
+        obs = person_observations(1)
+        points = obs.poses[0].keypoints.copy()
+        points[[5, 6, 11, 12], :2] = [60, 30]
+        obs = replace(obs, poses={0: replace(obs.poses[0], keypoints=points)})
+        self.assertEqual(self.process(1, obs).backend, "deepgazemr")
+
+    def test_separate_hard_pose_age_expires_without_renewing_remapped_timestamp(self):
+        self.service.pose_max_age = .35
+        for index in range(1, 12):
+            result = self.process(index, person_observations(index, inferred_index=1))
+        self.assertEqual(result.source, "pose_only")
+        self.assertEqual(result.inferred_at.frame_index, 1)
+        result = self.process(12, person_observations(12, inferred_index=1))
+        self.assertEqual(result.backend, "deepgazemr")
+
+    def test_zero_hard_pose_age_disallows_previous_frame(self):
+        self.service.pose_max_age = 0
+        self.process(1, person_observations(1))
+        self.assertEqual(self.process(2, person_observations(2, inferred_index=1)).backend,
+                         "deepgazemr")
 
     def test_scene_and_geometry_reset_neural_window_and_maps(self):
         self.deep.required = 16
@@ -178,6 +241,103 @@ class CascadeTests(unittest.TestCase):
         result = self.process(6, obs := replace(obs, frame=context(6)), preferred_track_id=9)
         self.assertEqual(result.backend, "deepgazemr")
         self.assertEqual(self.service.telemetry()["tier_reason"], "locked_subject_missing")
+
+    def test_distant_small_secondary_motion_does_not_churn_locked_primary(self):
+        self.service.lock_first_subject = True
+        for index in range(1, 12):
+            obs = person_observations(index)
+            x = 4 if index % 2 else 0
+            other = TrackObservation(1, 0, .9, (x, 10, x + 10, 50), 8)
+            obs = replace(obs, tracks=obs.tracks + (other,))
+            result = self.process(index, obs, preferred_track_id=7)
+        self.assertEqual(result.source, "pose_only")
+        self.assertEqual(self.deep.calls, 0)
+
+    def test_untrusted_distant_prediction_is_not_a_new_entrant_when_measured_again(self):
+        self.service.lock_first_subject = True
+        for index in range(1, 12):
+            obs = person_observations(index)
+            measured = index % 3 == 1
+            other = TrackObservation(1, 0, .9, (0, 10, 10, 50), 8,
+                                     measured_at=context(index if measured else index - 1),
+                                     source="detected" if measured else "predicted",
+                                     prediction_confidence=1 if measured else .65)
+            obs = replace(obs, tracks=obs.tracks + (other,))
+            result = self.process(index, obs, preferred_track_id=7)
+        self.assertEqual(result.source, "pose_only")
+        self.assertEqual(self.deep.calls, 0)
+        self.assertNotIn("new_subject", self.service.telemetry()["risk_reasons"])
+
+    def test_new_secondary_subject_rechecks_even_with_stable_primary(self):
+        self.service.lock_first_subject = True
+        for index in range(1, 5):
+            self.process(index, person_observations(index), preferred_track_id=7)
+        obs = person_observations(5)
+        obs = replace(obs, tracks=obs.tracks + (TrackObservation(1, 0, .9, (0, 10, 10, 50), 8),))
+        self.assertEqual(self.process(5, obs, preferred_track_id=7).backend, "deepgazemr")
+        self.assertEqual(self.service.telemetry()["risk_reasons"]["new_subject"], 1)
+
+    def test_new_subject_does_not_reset_consecutive_source_frame_window(self):
+        self.service.lock_first_subject = True
+        self.deep.required = 16
+        for index in range(1, 17):
+            self.process(index, person_observations(index), preferred_track_id=7)
+        obs = person_observations(17)
+        obs = replace(obs, tracks=obs.tracks + (TrackObservation(1, 0, .9, (0, 10, 10, 50), 8),))
+        result = self.process(17, obs, preferred_track_id=7)
+        self.assertEqual(result.backend, "deepgazemr")
+        self.assertEqual(self.deep.window, list(range(2, 18)))
+        self.assertEqual(self.deep.events[-2:], [("observe", 17), ("predict", 17)])
+
+    def test_second_person_rising_prominence_does_not_remain_pose_only(self):
+        self.service.lock_first_subject = True
+        for index in range(1, 6):
+            obs = person_observations(index)
+            box = (0, 10, 10, 50) if index < 5 else (0, 0, 38, 64)
+            obs = replace(obs, tracks=obs.tracks + (TrackObservation(1, 0, .9, box, 8),))
+            result = self.process(index, obs, preferred_track_id=7)
+            if index == 4:
+                self.assertEqual(result.source, "pose_only")
+        self.assertEqual(result.backend, "deepgazemr")
+        self.assertEqual(self.service.telemetry()["tier_reason"], "competing_person")
+
+    def test_locked_subject_loss_invalidates_cache_and_bypasses_cooldown(self):
+        self.service.lock_first_subject = True
+        # First request has an existing primary with no pose evidence.
+        obs = replace(person_observations(1), poses={})
+        self.process(1, obs, preferred_track_id=7)
+        # All pixels remain unchanged: identity loss alone makes the old map stale.
+        result = self.process(2, preferred_track_id=7)
+        self.assertEqual(result.backend, "deepgazemr")
+        self.assertEqual(result.inferred_at.frame_index, 2)
+        self.assertEqual(self.service.telemetry()["cooldown_bypasses"], 1)
+        for index in range(3, 9):
+            self.assertEqual(self.process(index, preferred_track_id=7).source, "cached")
+        self.assertEqual(self.deep.calls, 2)
+
+    def test_fresh_pose_does_not_validate_expired_tracking_measurement(self):
+        obs = person_observations(5)
+        stale = replace(obs.tracks[0], measured_at=context(1), source="predicted")
+        obs = replace(obs, tracks=(stale,))
+        self.assertEqual(self.process(5, obs).backend, "deepgazemr")
+
+    def test_subject_loss_without_identity_lock_also_bypasses_old_cooldown(self):
+        self.process(1, replace(person_observations(1), poses={}))
+        result = self.process(2)
+        self.assertEqual(result.backend, "deepgazemr")
+        self.assertEqual(result.inferred_at.frame_index, 2)
+        self.assertEqual(self.service.telemetry()["risk_reasons"]["subject_missing"], 1)
+
+    def test_factory_hard_pose_age_is_independent_of_refresh_and_preserves_zero(self):
+        from reframe.config import AppConfig
+        from reframe.saliency.factory import build_saliency_helper
+        for hard_age in (0, .35):
+            args = AppConfig(cue_interval=.2, pose_max_age=hard_age)
+            with patch("reframe.saliency.backends.deepgazemr.DeepGazeMRSaliencyHelper",
+                       return_value=FakeBackend()):
+                service = build_saliency_helper(args)
+            self.addCleanup(service.close)
+            self.assertEqual(service.pose_max_age, hard_age)
 
     def test_pose_changes_and_new_object_leave_pose_only(self):
         for index in range(1, 5):

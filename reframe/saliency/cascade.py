@@ -16,6 +16,7 @@ import numpy as np
 
 from reframe.contracts import FrameContext, FrameObservations, SaliencyResult, TrackObservation
 from reframe.geometry import box_iou
+from reframe.perception.reliability import assess_pose, pose_motion
 from reframe.saliency.base import SaliencyBackend
 from reframe.saliency.backends.handcrafted import HandcraftedSaliencyHelper
 from reframe.saliency.cache import SaliencyCache
@@ -27,7 +28,7 @@ class CascadeSaliencyService:
     """Conservative deterministic gates for an aggressive three-tier strategy.
 
     Three consecutive reliable observations permit pose-only framing.  A reliable
-    torso needs four body points, including three shoulders/hips; a visible face
+    torso needs three geometrically consistent shoulders/hips; a visible face
     is not required.  Scene/geometry changes and rewinds discard all temporal
     state.  Neural cache lifetime is 0.35 video seconds, independently of reuse.
     """
@@ -51,6 +52,9 @@ class CascadeSaliencyService:
         self.cache_max_age = 0.35
         self.tier_counts: Counter[str] = Counter()
         self.reason_counts: Counter[str] = Counter()
+        self.pose_evidence_counts: Counter[str] = Counter()
+        self.risk_counts: Counter[str] = Counter()
+        self.risk_escalations = self.cooldown_bypasses = 0
         self.total_frames = self.deepgaze_requests = self.cheap_predictions = 0
         self.tier_transitions = self.cache_hits = 0
         self._timings = HostTimings(("preparation", "observe", "selection_cache",
@@ -71,6 +75,9 @@ class CascadeSaliencyService:
         self._reason: str | None = None
         self._result: SaliencyResult | None = None
         self._frame_delta = 0.0
+        self._active_risks: frozenset[tuple] = frozenset()
+        self._observed_tracks: tuple[TrackObservation, ...] = ()
+        self._subject_ids: frozenset[int] = frozenset()
 
     @staticmethod
     def _resize(frame: np.ndarray, max_side: int) -> np.ndarray:
@@ -122,25 +129,57 @@ class CascadeSaliencyService:
                 or not pose.cues.get("has_pose") or track.confidence < 0.45
                 or track.track_id is None or pose.track_id != track.track_id
                 or pose.frame != context
+                or pose.inferred_at.frame_index > context.frame_index
                 or pose.inferred_at.scene_index != context.scene_index
                 or (pose.inferred_at.width, pose.inferred_at.height) != (context.width, context.height)
                 or not 0 <= context.timestamp - pose.inferred_at.timestamp <= self.pose_max_age + 1e-8):
             return False
-        points = np.asarray(pose.keypoints)
-        if points.shape != (17, 3):
-            return False
+        evidence = assess_pose(pose.keypoints, track.box, self.keypoint_conf)
+        self.pose_evidence_counts[evidence.reason] += 1
+        if evidence.torso_reliable and not evidence.face_reliable:
+            self.pose_evidence_counts["torso_without_face"] += 1
+        if evidence.torso_reliable and not evidence.limb_reliable:
+            self.pose_evidence_counts["torso_with_partial_limbs"] += 1
+        return evidence.torso_reliable
+
+    @staticmethod
+    def _area(track: TrackObservation) -> float:
         x1, y1, x2, y2 = track.box
-        w, h = max(x2 - x1, 1), max(y2 - y1, 1)
-        good = (np.isfinite(points).all(axis=1) & (points[:, 2] >= self.keypoint_conf)
-                & (points[:, 0] >= x1 - 0.12 * w) & (points[:, 0] <= x2 + 0.12 * w)
-                & (points[:, 1] >= y1 - 0.12 * h) & (points[:, 1] <= y2 + 0.12 * h))
-        return bool(good[5:].sum() >= 4 and good[[5, 6, 11, 12]].sum() >= 3)
+        return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+    @classmethod
+    def _relevant_tracks(cls, tracks: tuple[TrackObservation, ...],
+                         subjects: tuple[TrackObservation, ...]) -> tuple[TrackObservation, ...]:
+        """Keep entrants under review without letting a distant small actor churn L1.
+
+        This is only a stability filter. Full-frame image changes and all new
+        identities remain risk signals, and neural cache alignment uses all tracks.
+        """
+        if not subjects:
+            return tracks
+        identities = {t.track_id for t in subjects}
+        relevant = []
+        for track in tracks:
+            if track.track_id in identities:
+                relevant.append(track)
+                continue
+            for subject in subjects:
+                x1, y1, x2, y2 = subject.box
+                margin_x, margin_y = (x2 - x1) * .2, (y2 - y1) * .2
+                nearby = box_iou(track.box, (x1 - margin_x, y1 - margin_y,
+                                            x2 + margin_x, y2 + margin_y)) > 0
+                if nearby or cls._area(track) >= .45 * cls._area(subject):
+                    relevant.append(track)
+                    break
+        return tuple(relevant)
 
     def _subjects(self, observations: FrameObservations, preferred_track_id: int | None
                   ) -> tuple[tuple[TrackObservation, ...], bool, str]:
         people = tuple(t for t in observations.tracks if t.cls_id == 0)
         if not people:
-            return (), False, "no_person_pose"
+            reason = ("locked_subject_missing" if self.lock_first_subject
+                      and preferred_track_id is not None else "no_person_pose")
+            return (), False, reason
         preferred = next((t for t in people if t.track_id == preferred_track_id), None)
         if self.lock_first_subject and preferred_track_id is not None and preferred is None:
             return (), False, "locked_subject_missing"
@@ -155,6 +194,12 @@ class CascadeSaliencyService:
         if any(box_iou(subject.box, other.box) > 0.35
                for subject in subjects for other in people if subject.row_index != other.row_index):
             return subjects, False, "overlapping_people"
+        # A locked identity is a tracking preference, not evidence that a second
+        # person cannot become visually prominent. Retain the saliency cascade.
+        if (len(subjects) == 1 and any(
+                other.row_index != subjects[0].row_index and other.confidence >= .45
+                and self._area(other) >= .60 * self._area(subjects[0]) for other in people)):
+            return subjects, False, "competing_person"
         # Other tracked object classes are possible focal subjects too.
         if not self.lock_first_subject and any(t.cls_id != 0 for t in observations.tracks):
             return subjects, False, "competing_object"
@@ -172,21 +217,43 @@ class CascadeSaliencyService:
             pose = observations.poses.get(subject.row_index)
             if old_pose is None or old_pose.keypoints is None or pose is None or pose.keypoints is None:
                 return False
-            a, b = np.asarray(pose.keypoints), np.asarray(old_pose.keypoints)
-            if a.shape != (17, 3) or b.shape != (17, 3):
+            motion = pose_motion(old_pose.keypoints, old_track.box, pose.keypoints,
+                                 subject.box, self.keypoint_conf)
+            if motion.torso_displacement > .10:
+                self.pose_evidence_counts["torso_motion"] += 1
                 return False
-            valid = (np.isfinite(a).all(axis=1) & np.isfinite(b).all(axis=1)
-                     & (a[:, 2] >= self.keypoint_conf) & (b[:, 2] >= self.keypoint_conf))
-            valid[:5] = False
-            if valid.sum() < 4:
-                return False
-            def relative(points, box):
-                return (points[:, :2] - np.asarray(box[:2])) / np.maximum(
-                    np.asarray(box[2:]) - np.asarray(box[:2]), 1)
-            displacement = np.linalg.norm(relative(a, subject.box) - relative(b, old_track.box), axis=1)
-            if float(np.mean(displacement[valid])) > 0.10:
+            if motion.limb_displacement > .18:
+                # Reliable large limb motion affects framing. A missing or weak
+                # wrist alone must not invalidate a reliable back/shoulder/hip pose.
+                self.pose_evidence_counts["reliable_limb_motion"] += 1
                 return False
         return True
+
+    def _risks(self, observations: FrameObservations,
+               subjects: tuple[TrackObservation, ...], reason: str,
+               delta: float, tile: float,
+               observed_tracks: tuple[TrackObservation, ...]) -> frozenset[tuple]:
+        risks = set()
+        relevant = self._relevant_tracks(observations.tracks, subjects)
+        identities = tuple(sorted(t.track_id for t in relevant if t.track_id is not None))
+        if reason in {"overlapping_people", "locked_subject_missing", "competing_person",
+                      "competing_object", "ambiguous_subjects", "insufficient_or_stale_pose"}:
+            risks.add((reason, identities))
+        if delta >= .12 or tile >= .30:
+            risks.add(("severe_image_change",))
+        if self._previous is not None:
+            before = {t.track_id: t for t in self._previous.tracks}
+            subject_ids = {t.track_id for t in subjects if t.track_id is not None}
+            risks.update(("subject_missing", identity) for identity in self._subject_ids - subject_ids)
+            previous_ids = {t.track_id for t in self._observed_tracks}
+            for track in observed_tracks:
+                if track.track_id not in previous_ids or track.track_id is None:
+                    risks.add(("new_subject", track.track_id))
+            for track in relevant:
+                old = before.get(track.track_id)
+                if old is not None and not self._same_tracks((track,), (old,)):
+                    risks.add(("subject_geometry_change", track.track_id))
+        return frozenset(risks)
 
     @staticmethod
     def _cheap_evidence(saliency: np.ndarray, observations: FrameObservations,
@@ -224,7 +291,7 @@ class CascadeSaliencyService:
         scores.sort(reverse=True)
         if scores[0][0] < 0.65:
             return False
-        if reason in {"ambiguous_subjects", "competing_object"}:
+        if reason in {"ambiguous_subjects", "competing_object", "competing_person"}:
             return len(scores) == 1 or scores[0][0] >= 1.5 * max(scores[1][0], 1e-6)
         return scores[0][1] in {t.row_index for t in subjects} if subjects else True
 
@@ -251,6 +318,7 @@ class CascadeSaliencyService:
     def process(self, frame: np.ndarray, observations: FrameObservations, *,
                 preferred_track_id: int | None = None) -> SaliencyResult:
         context = observations.frame
+        observed_tracks = observations.tracks
         h, w = frame.shape[:2]
         if (w, h) != (context.width, context.height):
             raise ValueError("Frame context does not match image dimensions")
@@ -268,6 +336,8 @@ class CascadeSaliencyService:
             if (context.scene_index != old.scene_index or (w, h) != (old.width, old.height)
                     or context.frame_index <= old.frame_index or context.timestamp < old.timestamp):
                 self.reset()
+                self.risk_counts["scene_geometry_or_rewind"] += 1
+                self.risk_escalations += 1
         with self._timings.measure("preparation"):
             small = self._resize(frame, self.max_side)
             cheap_frame = self._resize(small, 160)
@@ -282,8 +352,27 @@ class CascadeSaliencyService:
         subjects, reliable, reason = self._subjects(observations, preferred_track_id)
         delta, tile = self._change(gray, self._gray)
         self._frame_delta = delta
+        risks = self._risks(observations, subjects, reason, delta, tile, observed_tracks)
+        self._observed_tracks = observed_tracks
+        self._subject_ids = frozenset(t.track_id for t in subjects if t.track_id is not None)
+        new_risks = risks - self._active_risks
+        urgent = bool(new_risks)
+        self._active_risks = risks
+        if urgent:
+            self.risk_escalations += 1
+            self.risk_counts.update(risk[0] for risk in new_risks)
+            self._stable_frames = self._cheap_stable_frames = 0
+            # A geometrically aligned neural map can still describe the wrong
+            # subject after new evidence. Do not blend/reuse it or delay review.
+            self.cache.reset()
+            self._cache_gray, self._cache_tracks = None, ()
+        previous_relevant = (() if self._previous is None else self._relevant_tracks(
+            self._previous.tracks, tuple(t for t in self._previous.tracks
+                                        if t.track_id in self._subject_ids)))
         stable = (self._previous is not None
-                  and self._same_tracks(observations.tracks, self._previous.tracks)
+                  and not urgent
+                  and self._same_tracks(self._relevant_tracks(observations.tracks, subjects),
+                                        previous_relevant)
                   and self._pose_stable(subjects, observations)
                   and delta < 0.045 and tile < 0.12)
         self._stable_frames = self._stable_frames + 1 if reliable and stable else 0
@@ -301,7 +390,8 @@ class CascadeSaliencyService:
             # Validate without contaminating the neural cache.
             cheap_cache = SaliencyCache()
             cheap = cheap_cache.refresh(prediction, context, None, gray.shape)
-            enough = reliable or self._cheap_evidence(cheap.map, observations, subjects, reason)
+            enough = ((reliable and not urgent)
+                      or self._cheap_evidence(cheap.map, observations, subjects, reason))
         self._cheap_stable_frames = self._cheap_stable_frames + 1 if enough else 0
         if enough:
             # Hold the last neural map briefly while evidence settles; never call
@@ -324,12 +414,15 @@ class CascadeSaliencyService:
             result = replace(self.cache.result, frame=context, source="cached")
             self.cache_hits += 1
             return self._finish(result, "deepgaze", "valid_neural_cache", observations, gray)
-        if (self._last_deep_request is not None
-                and context.frame_index - self._last_deep_request.frame_index < self.interval):
+        in_cooldown = (self._last_deep_request is not None
+                       and context.frame_index - self._last_deep_request.frame_index < self.interval)
+        if in_cooldown and not urgent:
             # A moving scene invalidates the old map; use current inexpensive
             # evidence during the neural cooldown instead of returning stale data.
             cheap = replace(cheap, reason="neural_cooldown")
             return self._finish(cheap, "handcrafted", "neural_cooldown", observations, gray)
+        if in_cooldown:
+            self.cooldown_bypasses += 1
         self._last_deep_request = context
         self.deepgaze_requests += 1
         with self._timings.measure("deepgaze"):
@@ -357,6 +450,11 @@ class CascadeSaliencyService:
                       deepgaze_requests=self.deepgaze_requests,
                       handcrafted_predictions=self.cheap_predictions, cache_hits=self.cache_hits,
                       tier_transitions=self.tier_transitions, tier_reasons=dict(self.reason_counts),
+                      pose_reliability_reasons=dict(self.pose_evidence_counts),
+                      risk_reasons=dict(self.risk_counts), risk_escalations=self.risk_escalations,
+                      cooldown_bypasses=self.cooldown_bypasses,
+                      active_risks=sorted({risk[0] for risk in self._active_risks}),
+                      pose_max_age=self.pose_max_age, tracking_max_age=self.tracking_max_age,
                       frame_change=self._frame_delta,
                       timing_seconds=dict(self._timings.seconds),
                       total_seconds=self._timings.total,

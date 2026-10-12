@@ -131,6 +131,19 @@ class PoseObservation:
 
 
 @dataclass(frozen=True)
+class MaskEvidence:
+    """Continuity between real masks, never renewed by a translated prediction.
+
+    ``change`` is the largest normalized change of area, centroid or top edge.
+    ``observations`` counts consecutive compatible real mask measurements.
+    """
+    measured_at: FrameContext
+    stable: bool
+    observations: int
+    change: float
+
+
+@dataclass(frozen=True)
 class TrackObservation:
     row_index: int
     cls_id: int
@@ -141,6 +154,7 @@ class TrackObservation:
     measured_at: FrameContext | None = None
     source: Literal["detected", "predicted"] = "detected"
     prediction_confidence: float = 1.0
+    mask_evidence: MaskEvidence | None = None
 
     def reliable_at(self, context: FrameContext, max_age: float = .1) -> bool:
         """Flow and pose remapping never renew the last detector measurement."""

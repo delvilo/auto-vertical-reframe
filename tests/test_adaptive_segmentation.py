@@ -232,11 +232,26 @@ class AdaptiveSegmentationTests(unittest.TestCase):
         self.assertEqual(len(self.fake.calls), 30)
         self.assertEqual(self.tracker.telemetry()["refresh_reasons"]["unsupported_tracker"], 29)
 
-    def test_weak_fresh_pose_forces_refresh_without_advancing_detection_age(self):
+    def test_weak_fresh_pose_alone_keeps_bounded_skip_with_stable_real_masks(self):
         self.warm(35)
         while self.history[-1][1].source != "detected":
             self.step()
         context, track = self.history[-1]
+        pose = PoseObservation(None, None, {"has_pose": False}, context, context, "inferred", track.track_id)
+        self.tracker.feedback(FrameObservations(context, (track,), {0: pose}), track.track_id)
+        before = len(self.fake.calls)
+        output = self.step()
+        self.assertEqual(output.source, "predicted")
+        self.assertEqual(output.measured_at, track.measured_at)
+        self.assertEqual(len(self.fake.calls), before)
+        self.assertLessEqual(self.tracker._interval, 3)
+
+    def test_weak_fresh_pose_and_unreliable_mask_force_detection(self):
+        self.warm(35)
+        while self.history[-1][1].source != "detected":
+            self.step()
+        context, track = self.history[-1]
+        track = replace(track, mask_evidence=None)
         pose = PoseObservation(None, None, {"has_pose": False}, context, context, "inferred", track.track_id)
         self.tracker.feedback(FrameObservations(context, (track,), {0: pose}), track.track_id)
         before = len(self.fake.calls)

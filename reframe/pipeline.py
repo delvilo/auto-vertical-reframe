@@ -7,9 +7,10 @@ import shutil
 import tempfile
 import time
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 import cv2
-from reframe.config import AppConfig, CLASS_IDS
+from reframe.config import AppConfig, CLASS_IDS, tracking_settings
 from reframe.contracts import CameraState
 from reframe.precrop import InferenceRegion
 from reframe.geometry import compute_base_crop, current_crop_size, clamp, lerp
@@ -146,7 +147,9 @@ def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
         model_resources.callback(saliency_helper.close)
         ranking_model = SubjectRankingModel()
         pose_helper = (PoseCueCache(YOLOPoseHelper(args), args.cue_interval, fps,
-                                   tracking_max_age=args.seg_max_age)
+                                   tracking_max_age=args.seg_max_age,
+                                   pose_max_age=args.pose_max_age,
+                                   tracking_profile=args.tracking_profile)
                        if CLASS_IDS["person"] in allowed_class_ids else None)
         if pose_helper is not None:
             model_resources.callback(pose_helper.close)
@@ -290,7 +293,10 @@ def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
                 primary_id = state.lock_track_id if state.lock_track_id is not None else state.tracked_id
                 tracker.feedback(local_observations, preferred_track_id=primary_id)
                 pipeline_timings.switch("saliency")
-                saliency = saliency_helper.process(inference_frame, local_observations,
+                # Keep low-trust secondary identities visible to risk monitoring.
+                # The cascade independently filters usable framing observations;
+                # reacquiring a predicted bystander must not invent a new entrant.
+                saliency = saliency_helper.process(inference_frame, replace(local_observations, tracks=tracks),
                                                    preferred_track_id=primary_id)
                 pipeline_timings.switch("subjects")
                 observations = region.to_source(local_observations)
@@ -625,6 +631,8 @@ def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
                              {"decoder": "opencv", "actual_device": "cpu",
                               "cpu_fallback": None, "frame_processing": "reference"}),
                 "preset": args.preset,
+                "tracking_settings": tracking_settings(args),
+                "legacy_flags": list(args.legacy_flags),
                 "frames_processed": stats["frames_processed"],
                 "stats_interval": args.stats_interval,
                 "segment_schema_version": SEGMENT_SCHEMA_VERSION,
@@ -675,4 +683,6 @@ def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
             }
             summary.update({f"saliency_{k}": v for k, v in saliency_telemetry.items()})
             summary.update({f"seg_{k}": v for k, v in tracker.telemetry().items()})
+            if pose_helper is not None and hasattr(pose_helper, "telemetry"):
+                summary.update({f"pose_{k}": v for k, v in pose_helper.telemetry().items()})
             logging.info("Summary: %s", json.dumps(summary, ensure_ascii=False))
