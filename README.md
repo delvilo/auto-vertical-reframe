@@ -86,14 +86,13 @@ auto_reframe.py input.mp4 stage2.mp4 --device 0 --saliency-device cuda \
 `--save-debug-preview` 會額外下載完整原圖。GPU 色彩轉換與插值可能改變部分模型結果，需比較視覺焦點。
 變動幀率來源會明確拒絕，避免套用固定 FPS 後改變播放速度。
 
-請使用 [Colab 分階段測試說明](docs/colab-torchcodec.md) 先短測再測長片；
-[工作／續作紀錄](docs/torchcodec-progress.md) 記錄各階段驗證與尚待完成的 GPU 測試。
-目前先持續優化，T4 測試延至最終版本集中執行；每階段須補驗的事項保留在
-[T4 待驗證紀錄](docs/t4-validation-pending.md)，不需每次提交都重跑長片。
+請使用 [T4 測試規格](docs/t4-validation.md) 先短測再測長片；
+[AI agent 交接文件](docs/agent-handoff.md) 記錄目前實作、測試入口及下一步。
+已完成本機驗證與歷史量測保留在 [驗證報表](docs/reports/implementation-validation-2026-10-12.md)，
+新 GPU 路徑仍須依規格集中驗證。
 
-方案 B 的主角排程、有限姿態快取與追蹤 profile 已接入，使用方式與續作紀錄見
-[方案 B](docs/scheme-b-progress.md)。[原始方案比較](docs/pipeline-optimization-options.md) 保留取捨依據，
-離線雙向插值 C 尚未實作。
+方案 B 的主角排程、有限姿態快取與追蹤 profile 已接入，設定與相容遷移見
+[交接文件](docs/agent-handoff.md)。離線雙向插值 C 尚未實作。
 `--dead-zone` 所有 preset 與測試收集器已預設為 `0`；可自行指定非零值。
 
 ### Colab：從 MediaPipe 遷移
@@ -203,8 +202,8 @@ balanced／fast 可放行經多次真實量測、面積小且遠離主角的旁�
 
 Pose 延長快取需兩次相容真實姿態、近期真實遮罩連續、身分穩定及無鄰近／搶鏡人物；
 預測遮罩只保留原始量測時間。`tracking_settings` 記錄展開後設定；
-每五秒 Segment 另有量測年齡分布、Pose 延長／拒絕原因與顯著性風險升級計數。
-各 profile 數值、舊旗標遷移與 T4 待測入口見 [方案 B](docs/scheme-b-progress.md)。
+收集器每五秒 Segment 另有量測年齡分布、Pose 延長／拒絕原因與顯著性風險升級計數。
+各 profile 數值、舊旗標遷移與 T4 待測入口見 [交接文件](docs/agent-handoff.md)。
 
 ### 方案 C：三級自動構圖與按需 DeepGaze MR
 
@@ -267,202 +266,21 @@ reference 路徑使用 CPU BGR，tensor 路徑保留解碼裝置上的小圖 RGB
 不保證總運算量減半；直向區域在固定長邊下甚至可能增加 DeepGaze 輸入像素。
 實際收益需比較相同影片的總耗時、神經推論呼叫數、峰值顯存及構圖品質。
 
-### Colab T4：診斷與短片驗證
+### 測試與 AI agent 交接
 
-先在已切換至新版程式的 checkout 執行 `python3 -u install_colab.py`。
-Python 3.13+、CUDA 相容套件及 FFmpeg NVENC 可先用以下命令檢查：
+- [AI agent 交接文件](docs/agent-handoff.md)：使用者決定、實作狀態、相容參數與接手順序。
+- [T4 測試規格](docs/t4-validation.md)：環境檢查、可複製命令、各階段驗收、續作與結果保存。
+- [目前實作／CPU 驗證報表](docs/reports/implementation-validation-2026-10-12.md)：361 通過、5 項 CUDA 跳過及真實模型短片證據。
+- [歷史驗證報表](docs/reports/historical-validation-through-2026-10-10.md) 與 [2026-10-08 T4 原報表](docs/colab-t4-results-2026-10-08.md)：保留舊版結果，不代表目前版本已通過 T4。
 
-```python
-!python3 -u /usr/local/bin/auto_reframe.py --diagnose-env --device 0 --video-encoder hevc_nvenc --native-debug --log-level DEBUG --ffmpeg-log-level info
-```
+主要收集器為 `scripts/colab_torchcodec.py`，Colab 可用 [notebook](notebooks/colab-torchcodec.ipynb)。
+`baseline/stage1/stage2` 是資料流；`conservative/balanced/fast` 是追蹤排程，比較時分別控制變因。
+保留 `scripts/benchmark_colab.py` 的共用驗證器與 `scripts/colab_audio_tail.py` 的音訊回歸工具。
 
-此模式列出 Python、套件與 GPU，執行 CUDA 矩陣乘法、卷積與兩幀 NVENC 測試，
-不代表 YOLO 或 DeepGaze 已實測。在影片所在目錄執行以下 cell；
-此範例使用中央半幅推論、主角優先姿態與關閉後處理，保留終端輸出、log 和失敗狀態：
-
-```bash
-%%bash
-set -euo pipefail
-python3 -u -m reframe \
-  'vv110.mp4' 'vv110V_cascade_middle_test.mp4' \
-  --seg-model yolo26n-seg.pt --pose-model yolo26n-pose.pt --device 0 \
-  --precrop middle --lock-first-subject --dead-zone 0.15 \
-  --video-encoder hevc_nvenc --max-frames 90 \
-  --saliency-device cuda \
-  --saliency-max-side 384 --saliency-interval 3 --no-saliency-amp \
-  --native-debug --log-level DEBUG --ffmpeg-log-level info \
-  2>&1 | tee /content/reframe-cascade-middle-test.log
-```
-
-確認兩行 `YOLO segmentation actual inference device=cuda:0` 與
-`YOLO pose actual inference device=cuda:0`，以及 Summary 的
-`video_encoder_actual=hevc_nvenc`。未偵測到人物時 pose 不會推論，
-`pose_device=null` 不能視為 pose GPU 測試成功。
-
-Summary 保留 `frames_with_head_cues`、`frames_with_pose`、`pose_rois_inferred`、
-`pose_rois_matched`、`pose_cache_hits`，並記錄三級策略、快取年齡與實際神經模型呼叫。
-比較 `saliency_tier_pose_only_frames`、`saliency_tier_handcrafted_frames`、
-`saliency_tier_deepgaze_frames` 與 `saliency_actual_forward_calls`，可辨識省下的運算。
-`elapsed_seconds`／`processing_fps` 包含初始化；`stage_wall_seconds` 是各階段的主機
-耗時，並非獨立 CUDA kernel benchmark。主角優先的省略量記錄於 `pose_rois_skipped`。
-頭部線索比例不是人臉偵測率；有姿態線索的幀數也不是姿態模型重新推論次數。
-日誌列出模組 SHA256 指紋，可辨識 editable checkout 實際使用的程式。
-
-舊版 T4 的 90 幀成功結果見 [Colab T4 紀錄](docs/colab-t4-results-2026-10-08.md)；
-該結果使用固定 DeepGaze 排程及後處理，不代表本次三級策略或 precrop 已在 T4 驗證。
-本次仍需用穩定人物、多人交錯、切鏡及非人物片段，比較暖機後耗時、呼叫數、
-頭腳裁切、主角遺失、鏡頭抖動與音畫同步。確認短片後，移除 `--max-frames 90`
-並更換輸出檔名處理完整影片。驗證範圍見 [MR_VALIDATION.md](MR_VALIDATION.md)。
-
-### Colab T4：縮圖、安全跳幀與顯著性計時比較
-
-**170 秒／完整長影片測試**：請使用 [長影片 Colab 測試流程](docs/colab-long-video.md)。
-它使用 `--full-video`，並每 5 秒影片時間及切鏡輸出分段 YOLO 頻率、實際偵測間隔與耗時。
-可選完整暖機、短暖機，或先比較逐幀基準與完整優化兩組；不為統計重置追蹤或快取。
-
-2026-10-09 上傳的同批 600 幀測試中，lazy 相較 eager 整體省時 4.8%，但仍比 gap 1
-慢 5.2%；縮圖仍占 8.19 秒，而且只省 13 次 YOLO。新版分別量測「先轉灰階」與
-「放寬遠處遺失次要人物的跳幀否決條件」的效果，並細分顯著性與整條管線計時。
-這些改動沒有增加 GPU 模型、CUDA stream 或並行推論；不能據此保證所有 CUDA 組合
-都不會出錯，也不能在尚未取得新版 T4 結果前承諾加速比例。
-
-在已安裝專案並掛載 Drive 的 Colab 執行以下 Python cell。使用 Python 3.13+；
-`git pull --ff-only` 更新目前 checkout，測試不重新安裝 PyTorch，也不清除權重快取。
-
-```python
-from datetime import datetime, timezone
-from pathlib import Path
-import subprocess, sys
-
-assert sys.version_info >= (3, 13), "需要 Python 3.13+"
-repo = Path("/content/auto-vertical-reframe")
-video = Path("/content/drive/MyDrive/video/1080p/crop/vv110.mp4")
-stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-smoke_dir = Path("/content") / ("reframe-smoke-" + stamp)
-run_dir = Path("/content") / ("reframe-benchmark-" + stamp)
-subprocess.run(["git", "pull", "--ff-only"], cwd=repo, check=True)
-
-def checkpoint(name):
-    return str(next((p for p in (video.parent / name, repo / name) if p.is_file()), Path(name)))
-
-common = [
-    sys.executable, "-u", str(repo / "scripts/benchmark_colab.py"),
-    "--input", str(video),
-    "--seg-model", checkpoint("yolo26n-seg.pt"),
-    "--pose-model", checkpoint("yolo26n-pose.pt"),
-    "--device", "0", "--saliency-device", "cuda", "--video-encoder", "hevc_nvenc",
-]
-# 先執行單組 60 幀 GPU 短測；失敗會保留原始 log 並在此停止。
-subprocess.run(common + ["--output-dir", str(smoke_dir), "--smoke"], cwd=repo, check=True)
-print("短測資料：", smoke_dir)
-```
-
-檢查短測影片與 `results.json` 的 `device_validation`：分割、Pose、DeepGaze 有實際呼叫
-才可標記 `cuda_verified`；`not_exercised` 表示該短片未觸發模型，並非 GPU 測試通過。
-若未觸發 DeepGaze，需選用資訊不足的片段或延長短測，再檢查該模型。確認後執行：
-
-```python
-subprocess.run(common + ["--output-dir", str(run_dir), "--max-frames", "600", "--repeats", "2"],
-               cwd=repo, check=True)
-print("測試資料：", run_dir)
-```
-
-預設四組，每相鄰兩組只改一個條件：
-
-| 組別 | YOLO 最大間隔 | 縮圖方法 | 跳幀條件 |
-| --- | --- | --- | --- |
-| `gap1-baseline` | 1 | `bgr-area`（不需要追蹤縮圖） | `all` |
-| `gap3-bgr-all` | 3 | `bgr-area` | `all` |
-| `gap3-gray-all` | 3 | `gray-area` | `all` |
-| `gap3-gray-primary` | 3 | `gray-area` | `primary` |
-
-四組均使用 lazy，顯著性細分計時也全部啟用。每組先暖機一次，再量測兩輪並反轉順序，
-共 **12 次程序**；每次最多 600 幀。若每次約兩分鐘，約需 24 分鐘，另加短測與首次下載。
-每次獨立程序仍含模型初始化；暖機及短測結果保留但
-不納入中位數。預設使用 middle、鎖定首位主角、conf=0.3、dead-zone=0、FP32 saliency
-及關閉 post-restore。需要重跑舊的三組 eager／lazy 對照時，加上 `--suite thumbnails`；
-該組合全部使用 `bgr-area` 與 `all`，不混入新策略。
-
-原始 stdout/stderr、CUDA 錯誤與 traceback 同時保留在終端與 `.log`；錯誤會保存已完成的
-資料並以非零狀態停止。明確指定 CUDA 時，收集器拒絕已執行模型的 CPU fallback 及
-DeepGaze 失敗 fallback；指定 NVENC 時也拒絕編碼器 fallback，不將其算作有效加速結果。
-輸出目錄必須不存在，以避免混入先前結果。程式另保存：
-
-- `results.json`：全部 Summary、實際命令、環境／Git／套件版本、PyTorch CUDA build、
-  實際模型裝置、ffprobe 結果與失敗原因。
-- `results.csv`：逐次攤平的計時、計數與輸出驗證資料。
-- `aggregates.csv`：排除暖機與失敗執行後，各組數值的中位數。
-- 各組 MP4 與原始 log：ffprobe 檢查實際影格數、FPS、尺寸與音訊是否存在；記錄音畫時間戳，
-  視覺構圖與感知音畫同步仍需人工檢查。
-
-執行完成後，用第二個 cell 顯示主要數據，並打包 log／JSON／CSV 下載（影片保留於 run_dir）：
-
-```python
-import pandas as pd
-from zipfile import ZipFile, ZIP_DEFLATED
-from google.colab import files
-
-df = pd.read_csv(run_dir / "aggregates.csv")
-columns = ["case", "measured_runs", "median.summary.elapsed_seconds",
-           "median.summary.stage_wall_seconds.segmentation",
-           "median.summary.seg_timing_seconds.thumbnail",
-           "median.summary.seg_timing_seconds.scheduler",
-           "median.summary.seg_timing_seconds.model_track",
-           "median.summary.seg_timing_seconds.parse_masks",
-           "median.summary.seg_thumbnail_builds",
-           "median.summary.seg_detector_calls", "median.summary.seg_predicted_frames",
-           "median.summary.stage_wall_seconds.saliency",
-           "median.summary.saliency_actual_forward_calls",
-           "median.summary.saliency_timing_seconds.preparation",
-           "median.summary.saliency_timing_seconds.observe",
-           "median.summary.saliency_timing_seconds.selection_cache",
-           "median.summary.saliency_deepgaze_timing_seconds.init",
-           "median.summary.saliency_deepgaze_timing_seconds.transfer",
-           "median.summary.saliency_deepgaze_timing_seconds.forward",
-           "median.summary.saliency_deepgaze_timing_seconds.postprocess",
-           "median.summary.pipeline_timing_seconds.decode",
-           "median.summary.pipeline_timing_seconds.scene"]
-display(df[[c for c in columns if c in df.columns]])
-archive = run_dir.with_suffix(".zip")
-with ZipFile(archive, "w", ZIP_DEFLATED) as bundle:
-    for directory in (smoke_dir, run_dir):
-        for path in sorted(directory.iterdir()):
-            if path.suffix in {".log", ".json", ".csv"}:
-                bundle.write(path, directory.name + "/" + path.name)
-files.download(str(archive))
-```
-
-`seg_timing_seconds` 的互斥分項為 `thumbnail`、`scheduler`、`frame_change`、`model_track`、
-`parse_masks`、`flow`、`predict`、`bookkeeping`，總和應等於 `seg_total_seconds`。
-它們是主機 wall time，沒有增加逐幀 CUDA 強制同步；`model_track` 含 YOLO 前後處理與
-ByteTrack，`parse_masks` 可能包含 GPU→CPU 等待，不能解讀成各模型的純 GPU kernel 時間。
-`scheduler` 只計入 `track()` 內的排程與穩定度更新；姿態後的 feedback 另外計入
-`pipeline_timing_seconds.feedback`。`timing_schema_version=2` 的 saliency 階段已排除 feedback，
-與舊 log 比較該階段時需一併考慮，不應把此計時歸類變動當作加速。
-`seg_flow_seconds` 保留為 `flow` 分項的相同值，不能再加總一次。
-
-新細分計時分為三層，每一層各自互斥，**不同層不可相加**：
-
-| 計時欄位 | 內容與核對方式 |
-| --- | --- |
-| `pipeline_timing_seconds` | `setup`、`decode`、`scene`、`segmentation`、`pose`、`feedback`、`saliency`、`subjects`、`camera`、`render_write`、`bookkeeping`、`finalization`；總和等於 `elapsed_seconds` |
-| `saliency_timing_seconds` | `preparation`、`observe`、`selection_cache`、`cheap`、`deepgaze`、`bookkeeping`；總和等於 `saliency_total_seconds`，包含於管線的 saliency 階段 |
-| `saliency_deepgaze_timing_seconds` | `init`、`observe`、`preprocess`、`transfer`、`forward`、`postprocess`、`fallback`、`bookkeeping`；總和等於 `saliency_deepgaze_total_seconds`，分別包含於上一層的 observe 與 deepgaze |
-
-收集器驗證每層合計與有限非負數值。`stage_wall_seconds` 保留四個既有欄位，與對應的
-pipeline 欄位相同；整條管線計時到 writer 完成為止，不包含之後的模型資源清理。
-新增計時僅讀取主機時鐘，沒有逐幀 `torch.cuda.synchronize()`；`forward` 包含主機提交 GPU
-工作的時間，既有 GPU→CPU 等待主要會出現在 `postprocess`，兩者都不是純 CUDA kernel 時間。
-
-`seg_thumbnail_builds` 是實際縮圖張數；`seg_thumbnail_backfills` 是其中補建上一幀的張數；
-`seg_thumbnail_cache_hits` 是重用上一幀灰階的次數；`seg_thumbnail_deferred_frames` 表示
-當下沒有建立本幀縮圖，之後可能補建，並非最終省下的張數。`seg_flow_attempts` 含失敗的光流嘗試。
-比較四組的 YOLO 呼叫、刷新原因、Pose／DeepGaze 次數及輸出品質，再確認縮圖與整體耗時
-是否下降。除了此段穩定影片，也應比較多人交錯、主角暫時消失及切鏡片段；
-新的跳幀條件可能改變追蹤與構圖，不能只看速度。新版的 T4 收益仍需用此測試實測。
-
-短音訊造成尾幀截斷的單次回歸，請使用 [Colab 音訊尾端測試](docs/colab-audio-tail.md)
-及其內附 notebook；它先做兩秒 mux 短測，再跑一次完整 gap1，保留現有構圖與 DeepGaze 策略。
+收集器每五秒及切鏡會輸出 Segment，可看各區段真實 YOLO 頻率、預測幀、Pose 更新、DeepGaze 呼叫與原因。
+核心 CLI 需設定 `--stats-interval` 才啟用分段，預設 0 關閉。
+Summary 是全片統計；層級幀數不等於模型 forward 次數，巢狀 host wall 計時不能跨層相加或當成 CUDA kernel 時間。
+新測試依規格先短後長，不預設重跑舊版多輪長片矩陣。
 
 ## Architecture
 
@@ -528,7 +346,7 @@ Python faulthandler，並印出採用的設定及 PyTorch build 資訊。
 所有原生錯誤與 FFmpeg stderr 都保留，不以降低 log level 隱藏問題。
 指定編碼器無法初始化時，一般處理會記錄並回退，`--diagnose-env` 則回報失敗。
 
-確認短片構圖與音畫同步後，移除 `--max-frames 90` 並更換輸出檔名處理完整影片。
+正式 T4 測試使用 [分階段收集器流程](docs/t4-validation.md)，先取得相符的 180 幀短測再處理完整影片。
 以相同影片比較速度與峰值顯存；姿態與分割共用 GPU，不保證整體處理速度一定提高。
 
 官方介面參考：[Pose](https://docs.ultralytics.com/tasks/pose/)、

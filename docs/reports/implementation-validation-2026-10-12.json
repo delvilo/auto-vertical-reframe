@@ -1,0 +1,29 @@
+{
+  "kind": "Historical local test summary; no new execution during documentation cleanup",
+  "evidence_date": "2026-10-12",
+  "implementation_baseline": "71b4ed294100efcf81446cd3d50eb07c9f559a01",
+  "execution_scope": "Development working tree before final documentation commits; no archived full tree fingerprint",
+  "python": "3.13.5",
+  "torch": "2.11.0+cpu",
+  "cuda_available": false,
+  "tests_run": 366,
+  "passed": 361,
+  "skipped": 5,
+  "failed": 0,
+  "elapsed_seconds": 53.076,
+  "skips": "2 CUDA pixel/peak-memory tests and 3 CUDA DeepGaze tensor-window tests",
+  "raw_log": {
+    "original_local_path": "/tmp/scheme-b-final-tests-verified.log",
+    "sha256": "4f6251ad4cbc0908954ca062c33db582927ba0a8ec52e9ec366993858892e4f8",
+    "included_in_repository": false
+  },
+  "cpu_smoke_summary": {
+    "path": "scheme-b-cpu-evidence.json",
+    "sha256": "3c653c095e07f39a42b83cfe606ed2ed007df0fedbd112d8607db686f29ac160"
+  },
+  "limits": [
+    "CPU results do not validate T4",
+    "Raw local log may disappear with original cloud environment",
+    "Real DeepGaze reference and YOLO checks require the checkpoint/reference fixtures"
+  ]
+}

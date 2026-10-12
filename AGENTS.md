@@ -14,3 +14,12 @@ The user selected **Python 3.13+** as the compatibility baseline on 2026-10-08.
 
 Current saliency baseline: DeepGaze MR with the phase-1 modular backend interface.
 Preserve terminal stdout/stderr, native tracebacks and explicit backend telemetry.
+
+# Continuation and validation
+
+Start with [docs/agent-handoff.md](docs/agent-handoff.md) for the current implementation,
+user decisions, retained evidence and the next actionable work. Follow
+[docs/t4-validation.md](docs/t4-validation.md) for pending GPU checks and collector commands.
+Reports in `docs/reports/` and the historical T4 report are evidence of their stated
+versions, not instructions to replay old workflows. CPU passes, CUDA skips and
+models with zero real calls do not establish T4 validation.

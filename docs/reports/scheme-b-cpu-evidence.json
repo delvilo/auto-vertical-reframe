@@ -1,0 +1,73 @@
+{
+  "kind": "CPU functional smoke, not T4 performance comparison",
+  "input": "adaptive-input.mp4",
+  "output": "scheme-b-tensor.mp4",
+  "saliency_max_side": 128,
+  "summary": {
+    "frames_processed": 90,
+    "source_fps": 60.0,
+    "elapsed_seconds": 19.17572941601975,
+    "tracking_settings": {
+      "tracking_profile": "balanced",
+      "seg_max_gap": 6,
+      "seg_max_age": 0.1,
+      "cue_interval": 0.2,
+      "pose_max_age": 0.35,
+      "saliency_interval": 3,
+      "seg_skip_policy": "primary"
+    },
+    "seg_detector_calls": 90,
+    "seg_predicted_frames": 0,
+    "seg_refresh_reasons": {
+      "initial": 1,
+      "unsettled_tracks": 1,
+      "low_confidence": 88
+    },
+    "pose_rois_inferred": 11,
+    "pose_extension_hits": 0,
+    "saliency_actual_forward_calls": 4,
+    "saliency_frames_fallback": 0,
+    "saliency_tier_pose_only_frames": 0,
+    "saliency_tier_handcrafted_frames": 15,
+    "saliency_tier_deepgaze_frames": 75
+  },
+  "segments": 3,
+  "output_validation": {
+    "source_frames": 90,
+    "output_frames": 90,
+    "source_fps": 60.0,
+    "output_fps": 60.0,
+    "source_has_audio": true,
+    "output_has_audio": true,
+    "source_video_start_time_seconds": 0.0,
+    "source_video_duration_seconds": 1.5,
+    "source_audio_start_time_seconds": 0.0,
+    "source_audio_duration_seconds": 1.5,
+    "source_av_start_delta_seconds": 0.0,
+    "output_video_start_time_seconds": 0.0,
+    "output_video_duration_seconds": 1.5,
+    "output_audio_start_time_seconds": 0.0,
+    "output_audio_duration_seconds": 1.6,
+    "output_av_start_delta_seconds": 0.0
+  },
+  "audio_validation": {
+    "video_end_seconds": 1.5,
+    "audio_end_seconds": 1.6,
+    "audio_minus_video_end_seconds": 0.10000000000000009,
+    "tolerance_seconds": 0.1,
+    "status": "endpoints_within_tolerance"
+  },
+  "decoder_validation": {
+    "decoder": "torchcodec",
+    "frame_processing": "tensor",
+    "requested_device": "cpu",
+    "actual_device": "cpu",
+    "cpu_fallback": false,
+    "cpu_fallback_status_known": true,
+    "frames_decoded": 90,
+    "frames_yielded": 90,
+    "decode_wall_seconds": 0.06760617590043694,
+    "initialization_wall_seconds": 1.2279882990405895,
+    "status": "explicit_cpu_test"
+  }
+}
