@@ -333,9 +333,15 @@ class SegmentationTracker:
         spread = 3 * (sigma[:4] + horizon * sigma[4:])
         width_extra = (max(mean[3], end[3]) * spread[2]
                        + max(mean[2], end[2]) * spread[3] + spread[2] * spread[3])
-        margin = spread[:2] + .5 * np.array([width_extra, spread[3]])
-        return np.concatenate((np.minimum(mean[:2], end[:2]) - size / 2 - margin,
-                               np.maximum(mean[:2], end[:2]) + size / 2 + margin))
+        half_span = .5 * size + spread[:2] + .5 * np.array([width_extra, spread[3]])
+        min_center = np.minimum(mean[:2], end[:2])
+        max_center = np.maximum(mean[:2], end[:2])
+        return np.array([
+            min_center[0] - half_span[0],
+            min_center[1] - half_span[1],
+            max_center[0] + half_span[0],
+            max_center[1] + half_span[1],
+        ], dtype=np.float64)
 
     def _unsettled_detail(self, native):
         """Guard primary/entrants; isolate only small, distant established bystanders."""
@@ -378,7 +384,8 @@ class SegmentationTracker:
             return "primary_uncertain_motion"
         primary_box = np.asarray(primary.xyxy)
         guard = .5 * (primary_box[2:] - primary_box[:2])
-        primary_envelope += np.concatenate((-guard, guard))
+        primary_envelope[:2] -= guard
+        primary_envelope[2:] += guard
         for track in native.lost_stracks:
             envelope = self._motion_envelope(track, horizon)
             if envelope is None:
@@ -475,7 +482,8 @@ class SegmentationTracker:
                 primary_box = np.asarray(primary.xyxy)
                 primary_area = float(np.prod(primary_box[2:] - primary_box[:2]))
                 guard = .5 * (primary_box[2:] - primary_box[:2])
-                envelope += np.concatenate((-guard, guard))
+                envelope[:2] -= guard
+                envelope[2:] += guard
                 low_risk = set()
                 for track in tracks:
                     if track.track_id not in self._secondary_relief:

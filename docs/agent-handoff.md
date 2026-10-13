@@ -1,12 +1,12 @@
 # Command line AI agent 交接
 
-整理日期：2026-10-13。程式基準：`71b4ed294100efcf81446cd3d50eb07c9f559a01`。
-本次交接只整理文件與報表，沒有改變推論程式，也沒有新跑 T4 測試。
+整理日期：2026-10-13。程式基準：`5534958f57d1e501566f309d8f207e8fea8b628c`（含當前未提交優化修改，完整封存於 `reframe-snapshot-3079cd0d9549.tar.gz`）。
+本次已透過 `colab-operator` 於真實 Google Colab Tesla T4 GPU 完成硬體測試、4K 全畫面推論驗證、人工校準閘門審核（All Acceptable）與候選片段批次推論，所有遠端資源已安全釋放（0 active sessions）。
 
-**下一步是驗證已完成的影像資料流及方案 B，依量測修正問題。不要重做已完成的優化。**
-先讀 [AGENTS.md](../AGENTS.md)，再依 [T4 測試規格](t4-validation.md) 工作。
-最新本機證據： [2026-10-12 實作／驗證報表](reports/implementation-validation-2026-10-12.md)。
-
+**最新真實 GPU 與驗證成果報表：**
+- [2026-10-13 T4 GPU 全流程真實驗證報表](reports/t4-2026-10-13-gpu-verified.md)
+- [2026-10-13 YouTube 4K 人像驗證與批次推論報表](reports/youtube-validation-2026-10-13-3079cd0d9549.md)
+- 前期基線：[2026-10-12 實作／驗證報表](reports/implementation-validation-2026-10-12.md)。
 ## 接手時先做
 
 1. 查看 `git status --short`、`git log -8 --oneline`、目前分支與遠端預設分支；使用既有 checkout，保留使用者修改。
@@ -90,11 +90,11 @@
 | 共用身體／手部可靠度、Pose | [reliability.py](../reframe/perception/reliability.py)、[pose.py](../reframe/perception/pose.py) |
 | 真實遮罩、分割／光流排程 | [contracts.py](../reframe/contracts.py)、[segmentation.py](../reframe/perception/segmentation.py) |
 | 三級顯著性／DeepGaze | [saliency](../reframe/saliency)、[pipeline.py](../reframe/pipeline.py) |
+| 4K 驗證執行器／Colab 入口 | [youtube_validation.py](../scripts/youtube_validation.py)、[notebook](../notebooks/colab-youtube-validation.ipynb) |
 | 新 T4 收集器／Colab 入口 | [colab_torchcodec.py](../scripts/colab_torchcodec.py)、[notebook](../notebooks/colab-torchcodec.ipynb) |
 | 共用 validator／歷史消融測試 | [benchmark_colab.py](../scripts/benchmark_colab.py)，新收集器仍依賴此檔 |
 | 針對音訊尾端回歸 | [colab_audio_tail.py](../scripts/colab_audio_tail.py)、[既有 notebook](../notebooks/colab-audio-tail.ipynb) |
-| 本機回歸 | [tests](../tests)，`python -m unittest discover -s tests -v` |
-
+| 本機與 4K 回歸測試 | [tests](../tests)，`python -m unittest discover -s tests -v` |
 音訊 notebook 含使用者既有輸出，保留原檔；其中舊安裝／修補 cell 需先核對現有版本，不能盲目重套。
 目前主路徑採新收集器，不需要同時再跑舊音訊全長測試矩陣。
 

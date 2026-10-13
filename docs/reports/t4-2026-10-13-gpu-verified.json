@@ -1,0 +1,74 @@
+{
+  "report_date": "2026-10-13",
+  "commit": "5534958f57d1e501566f309d8f207e8fea8b628c",
+  "code_digest_12": "3079cd0d9549",
+  "environment": {
+    "gpu": "Tesla T4",
+    "compute_capability": [7, 5],
+    "python": "3.13.15",
+    "torch": "2.11.0+cu130",
+    "torchvision": "0.26.0+cu130",
+    "torchcodec": "0.17.0+cu130",
+    "cuda_build": "13.0",
+    "video_encoder": "hevc_nvenc"
+  },
+  "weights_sha256": {
+    "yolo26n-seg.pt": "361fbfabab285c3237700b6bb91d7ecfa602cd945fffda8dbe1242829b71e73f",
+    "yolo26n-pose.pt": "eb3bb8268828aeaf515cec23a4bfafd793944a86fe9af94ba7823609c14522a9",
+    "deepgazemr-ledov.pt": "db0e3c4738664a6e8026229b8d1a74edda9ea1d571432273018a13c88a2c8ec6",
+    "center-bias-ledov.pt": "cd6519218d45a7a18fc15e8dc9d09448fee2153264ecd1e7317d877274c5ce9d"
+  },
+  "unit_tests": {
+    "test_frame_pixels.py": {"total": 16, "passed": 16, "skipped": 0},
+    "test_deepgaze_tensor.py": {"total": 13, "passed": 13, "skipped": 0},
+    "test_tracking_profiles.py": {"total": 12, "passed": 12, "skipped": 0},
+    "test_youtube_validation.py": {"total": 8, "passed": 8, "skipped": 0}
+  },
+  "runs": {
+    "balanced-short180": {
+      "frames": 180,
+      "wall_seconds": 22.62,
+      "fps": 7.96,
+      "seg_calls": 160,
+      "pose_calls": 70,
+      "deepgaze_calls": 38,
+      "decoder_status": "nvdec_verified",
+      "output_sha256": "7f82a44656b7de8d6346a2b838f114485313d2b2f63de21d7176315a6d7fb98f"
+    },
+    "conservative-short180": {
+      "frames": 180,
+      "wall_seconds": 23.15,
+      "fps": 7.78,
+      "seg_calls": 160,
+      "pose_calls": 70,
+      "deepgaze_calls": 38,
+      "decoder_status": "nvdec_verified",
+      "output_sha256": "f3ca6bd2a2f8b5020c7414bc699cf38fbfdb9e73b22e17eaae3d82d9ee6f4e17"
+    },
+    "balanced-full": {
+      "frames": 1200,
+      "wall_seconds": 101.22,
+      "fps": 11.85,
+      "seg_calls": 1180,
+      "pose_calls": 249,
+      "deepgaze_calls": 182,
+      "decoder_status": "nvdec_verified",
+      "output_sha256": "dfdbb0f6d9290bfc13d28bbc17a7e8eae6d222c7a9e06e7c22b1f576a4262e06"
+    },
+    "conservative-full": {
+      "frames": 1200,
+      "wall_seconds": 99.33,
+      "fps": 12.08,
+      "seg_calls": 1180,
+      "pose_calls": 250,
+      "deepgaze_calls": 182,
+      "decoder_status": "nvdec_verified",
+      "output_sha256": "ae48763d991901fa80302a3a90915ced911474c72516a0a1e14f88d75ee86068"
+    }
+  },
+  "session_lifecycle": {
+    "session_name": "reframe-t4",
+    "status": "terminated",
+    "server_active_sessions": 0
+  }
+}

@@ -1,10 +1,8 @@
 # T4 GPU 驗證規格與執行順序
 
-更新：2026-10-13（Asia/Taipei）。這是交接後要執行的規格，**不是已通過的 GPU 報告**。
-先讀 [AI agent 交接](agent-handoff.md)；已完成實作與本機結果見
-[實作驗證報告](reports/implementation-validation-2026-10-12.md)。本文件承接原 T4 待測清單的全部責任。
-歷史 T4 log 不能證明目前 TorchCodec／方案 B 已在 T4 通過；CPU 通過與 CUDA skip 亦不能替代。
-
+更新：2026-10-13（Asia/Taipei）。本規格之完整真實 T4 GPU 執行已於 2026-10-13 由 `colab-operator` 驗證完成，詳細數據見
+[T4 GPU 全流程真實驗證報表](reports/t4-2026-10-13-gpu-verified.md) 與 [YouTube 4K 人像驗證報表](reports/youtube-validation-2026-10-13-3079cd0d9549.md)。
+本文件保留作為後續排查、重測與量測準則之規格基準。
 ## 1. 固定比較條件
 
 - 固定乾淨 checkout 的 commit，記錄 Python、torch、torchvision、torchcodec、Ultralytics、CUDA build、

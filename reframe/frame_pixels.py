@@ -64,13 +64,17 @@ def _bilinear_sampled_resize(rgb, height, width):
     gather result coexist. Normal float32 rounding may differ by one byte from
     the native float32 resize after quantization.
     """
+    import torch
     source_h, source_w = rgb.shape[-2:]
     y0, y1, x0, x1, wy, wx, wy0, wx0 = _bilinear_sampling_axes(
         source_h, source_w, height, width, rgb.device)
-    top = rgb[:, y0[:, None], x0[None, :]].float().mul_(wx0)
-    top.addcmul_(rgb[:, y0[:, None], x1[None, :]].float(), wx)
-    bottom = rgb[:, y1[:, None], x0[None, :]].float().mul_(wx0)
-    bottom.addcmul_(rgb[:, y1[:, None], x1[None, :]].float(), wx)
+    top = torch.empty((3, height, width), dtype=torch.float32, device=rgb.device)
+    bottom = torch.empty((3, height, width), dtype=torch.float32, device=rgb.device)
+    temp = torch.empty((3, height, width), dtype=torch.float32, device=rgb.device)
+    top.copy_(rgb[:, y0[:, None], x0[None, :]]).mul_(wx0)
+    top.addcmul_(temp.copy_(rgb[:, y0[:, None], x1[None, :]]), wx)
+    bottom.copy_(rgb[:, y1[:, None], x0[None, :]]).mul_(wx0)
+    bottom.addcmul_(temp.copy_(rgb[:, y1[:, None], x1[None, :]]), wx)
     return top.mul_(wy0).addcmul_(bottom, wy)
 
 

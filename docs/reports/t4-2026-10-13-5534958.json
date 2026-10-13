@@ -1,0 +1,87 @@
+{
+  "kind": "T4 validation continuation report on current runtime environment",
+  "evidence_date": "2026-10-13",
+  "implementation_baseline": "553495804f58c49987817b189ff705bc0a89d708",
+  "short_sha": "5534958",
+  "execution_scope": "Clean main branch at 5534958",
+  "python": "3.13.5",
+  "torch": "2.14.1+cpu",
+  "torchvision": "0.29.1+cpu",
+  "torchcodec": "0.17.0+cpu",
+  "ultralytics": "8.4.173",
+  "opencv": "4.14.0.94",
+  "scenedetect": "0.7.1",
+  "lap": "0.5.13",
+  "scipy": "1.18.1",
+  "ffmpeg": "7.1.1-1+b1",
+  "cuda_available": false,
+  "gpu_hardware": null,
+  "tests_run": 366,
+  "passed": 356,
+  "skipped": 10,
+  "failed": 0,
+  "elapsed_seconds": 21.636,
+  "skips_summary": {
+    "cuda_hardware_skips": 5,
+    "deepgaze_upstream_reference_skips": 2,
+    "yolo_real_checkpoint_skips": 3
+  },
+  "t4_responsibilities": {
+    "M1": "pending",
+    "M2": "pending",
+    "M3A": "pending",
+    "M3B": "pending",
+    "M3C": "pending",
+    "M4": "pending",
+    "M5": "pending",
+    "M6": "pending",
+    "D0": "pass",
+    "P0": "pass",
+    "P1": "pending",
+    "P2": "pending",
+    "P3": "pending",
+    "P4": "pending",
+    "P5_C": "not_applicable"
+  },
+  "missing_prerequisites_for_t4": [
+    "NVIDIA T4 GPU hardware and CUDA runtime (torch/torchvision/torchcodec CUDA builds)",
+    "video-170s.mp4 (4K 60 FPS 10,252 frames) and 242s fixed camera video",
+    "yolo26n-seg.pt (SHA-256: 361fbfabab285c3237700b6bb91d7ecfa602cd945fffda8dbe1242829b71e73f)",
+    "yolo26n-pose.pt (SHA-256: eb3bb8268828aeaf515cec23a4bfafd793944a86fe9af94ba7823609c14522a9)",
+    "deepgazemr-ledov.pt (SHA-256: db0e3c4738664a6e8026229b8d1a74edda9ea1d571432273018a13c88a2c8ec6)",
+    "center-bias-ledov.pt (SHA-256: cd6519218d45a7a18fc15e8dc9d09448fee2153264ecd1e7317d877274c5ce9d)",
+    "DEEPGAZE_REFERENCE_REPO (upstream commit 7beab05d96a36eb7b343995a10d5e91d46e52ddf)"
+  ],
+  "optimization_proposals": [
+    {
+      "id": "OPT-1",
+      "target": "M6 / M3B",
+      "title": "DeepGaze observation streaming and GPU preprocessing on dedicated CUDA stream",
+      "benefit": "Hide tensor float normalization and window updates behind YOLO/Pose inference time"
+    },
+    {
+      "id": "OPT-2",
+      "target": "M5",
+      "title": "CUDA Sampled Bilinear downscale fused operator",
+      "benefit": "Avoid intermediate float32 buffer allocations on 4K frames and lower peak VRAM"
+    },
+    {
+      "id": "OPT-3",
+      "target": "M3A / P1",
+      "title": "Candidate Pose ROI batching aggregation on GPU",
+      "benefit": "Aggregate multi-person ROI crops into single TensorRT/YOLO pose batch pass"
+    },
+    {
+      "id": "OPT-4",
+      "target": "M2 / Stage2",
+      "title": "TorchCodec NVDEC Zero-Copy Tensor pipeline",
+      "benefit": "Eliminate NV12 to RGB CPU bounce-buffer; direct GPU tensor to YOLO predictor"
+    },
+    {
+      "id": "OPT-5",
+      "target": "P3",
+      "title": "Adaptive frame-skip window acceleration-based tuning",
+      "benefit": "Dynamically adjust skip intervals based on torso mask centroid acceleration"
+    }
+  ]
+}

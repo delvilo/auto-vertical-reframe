@@ -1,0 +1,240 @@
+{
+  "eligible_sources_count": 5,
+  "total_proposed_clips": 8,
+  "category_coverage": {
+    "crossing": [
+      "clip_tos_01",
+      "clip_agent_01"
+    ],
+    "occlusion": [
+      "clip_tos_01",
+      "clip_scp_01",
+      "clip_charge_02"
+    ],
+    "back_hands": [
+      "clip_tos_01",
+      "clip_scp_01",
+      "clip_agent_01"
+    ],
+    "dark_cut": [
+      "clip_tos_02",
+      "clip_scp_02",
+      "clip_charge_02",
+      "clip_sintel_01"
+    ],
+    "fast_motion": [
+      "clip_tos_02",
+      "clip_scp_02",
+      "clip_charge_01",
+      "clip_agent_01",
+      "clip_sintel_01"
+    ],
+    "orbit": [
+      "clip_tos_02",
+      "clip_charge_01"
+    ]
+  },
+  "candidates": [
+    {
+      "id": "OHOpb2fS-cM",
+      "url": "https://www.youtube.com/watch?v=OHOpb2fS-cM",
+      "title": "Tears of Steel in 4k - Official Blender Foundation release",
+      "author": "Blender Foundation",
+      "duration_seconds": 734,
+      "resolution": "3840x2160 (4K UHD)",
+      "license": "Creative Commons Attribution 3.0 (CC-BY 3.0)",
+      "license_evidence": "Description: 'All data for the film is available under Creative Commons Attribution. Visit http://www.tearsofsteel.org for more information or downloads.'",
+      "download_source": "Official Blender Foundation repository / media.xiph.org / tearsofsteel.org open download",
+      "subject_type": "Live-action human actors (Thom, Celia, scientists, soldiers)",
+      "status": "eligible",
+      "proposed_clips": [
+        {
+          "clip_id": "clip_tos_01",
+          "category": [
+            "crossing",
+            "occlusion",
+            "back_hands"
+          ],
+          "target_subject": "Thom (lead male character in lab coat/prosthetic arm)",
+          "start_seconds": 105,
+          "end_seconds": 155,
+          "duration_seconds": 50,
+          "description": "Lab confrontation dialogue: Celia approaches Thom, character crossing, hand gestures manipulating robotic controls, back view framing."
+        },
+        {
+          "clip_id": "clip_tos_02",
+          "category": [
+            "dark_cut",
+            "fast_motion",
+            "orbit"
+          ],
+          "target_subject": "Thom (at battlefield station)",
+          "start_seconds": 510,
+          "end_seconds": 555,
+          "duration_seconds": 45,
+          "description": "Battle climax: alternating cuts between bright exterior square and dark cockpit interior, fast movement dodging attacks, camera orbit around character."
+        }
+      ]
+    },
+    {
+      "id": "MEOZkf4imaM",
+      "url": "https://www.youtube.com/watch?v=MEOZkf4imaM",
+      "title": "096 | SCP Short Film [4K]",
+      "author": "MrKlay",
+      "duration_seconds": 1425,
+      "resolution": "3840x2160 (4K UHD)",
+      "license": "Creative Commons Attribution-ShareAlike 3.0 (CC-BY-SA 3.0)",
+      "license_evidence": "Description: 'Creative Commons Sharealike 3.0 and all concepts originate from http://www.scp-wiki.net and its authors. This video, being derived from this content, is hereby also released under Creative Commons Sharealike 3.0.'",
+      "download_source": "YouTube direct CC-BY-SA platform distribution",
+      "subject_type": "Live-action human actors (Doctor Daniels, Inspector Arlia, tactical team)",
+      "status": "eligible",
+      "proposed_clips": [
+        {
+          "clip_id": "clip_scp_01",
+          "category": [
+            "back_hands",
+            "occlusion"
+          ],
+          "target_subject": "Doctor Daniels (interrogated scientist)",
+          "start_seconds": 135,
+          "end_seconds": 180,
+          "duration_seconds": 45,
+          "description": "Interrogation room sequence: seated male speaker with expressive hand gestures, turning back/profile, foreground shoulder framing."
+        },
+        {
+          "clip_id": "clip_scp_02",
+          "category": [
+            "dark_cut",
+            "fast_motion"
+          ],
+          "target_subject": "Lead tactical operative",
+          "start_seconds": 680,
+          "end_seconds": 725,
+          "duration_seconds": 45,
+          "description": "Night operation in forest: low light / dark environment, flashlight beam, rapid movements and cuts between operators."
+        }
+      ]
+    },
+    {
+      "id": "UXqq0ZvbOnk",
+      "url": "https://www.youtube.com/watch?v=UXqq0ZvbOnk",
+      "title": "CHARGE - Blender Open Movie",
+      "author": "Blender Studio",
+      "duration_seconds": 263,
+      "resolution": "3840x2160 (4K UHD)",
+      "license": "Creative Commons Attribution 4.0 (CC-BY 4.0)",
+      "license_evidence": "Description: 'CHARGE is an open movie, made entirely with Blender. Get the production files, assets and exclusive making-of videos by joining Blender Studio at https://studio.blender.org/films/charge'",
+      "download_source": "Official Blender Studio open movie distribution / studio.blender.org",
+      "subject_type": "CGI Human character (Einar, elderly male scavenger)",
+      "status": "eligible",
+      "proposed_clips": [
+        {
+          "clip_id": "clip_charge_01",
+          "category": [
+            "orbit",
+            "fast_motion"
+          ],
+          "target_subject": "Einar (elderly male protagonist)",
+          "start_seconds": 70,
+          "end_seconds": 115,
+          "duration_seconds": 45,
+          "description": "Combat encounter: camera circles around Einar as he leaps, dodges, and swings battery pack, high-velocity movement."
+        },
+        {
+          "clip_id": "clip_charge_02",
+          "category": [
+            "dark_cut",
+            "occlusion"
+          ],
+          "target_subject": "Einar",
+          "start_seconds": 140,
+          "end_seconds": 185,
+          "duration_seconds": 45,
+          "description": "Dark corridor retreat: intermittent electrical sparks, robot limbs and metallic obstacles occluding protagonist, rapid shot transitions."
+        }
+      ]
+    },
+    {
+      "id": "GOGM6YbFhJg",
+      "url": "https://www.youtube.com/watch?v=GOGM6YbFhJg",
+      "title": "Agent 327: Operation Barber | Action Comedy Animated Short (4K)",
+      "author": "Open Cinema Studio / Blender Animation Studio",
+      "duration_seconds": 177,
+      "resolution": "3840x2160 (4K 50fps)",
+      "license": "Creative Commons Attribution 3.0 (CC-BY 3.0)",
+      "license_evidence": "Official Blender Animation Studio Open Movie production under CC-BY.",
+      "download_source": "Blender Studio open distribution",
+      "subject_type": "Stylized human character (Agent 327, male secret agent)",
+      "status": "eligible",
+      "proposed_clips": [
+        {
+          "clip_id": "clip_agent_01",
+          "category": [
+            "crossing",
+            "back_hands",
+            "fast_motion"
+          ],
+          "target_subject": "Agent 327 (secret agent in trench coat)",
+          "start_seconds": 45,
+          "end_seconds": 90,
+          "duration_seconds": 45,
+          "description": "Barbershop combat: rapid hand-to-hand fight between Agent 327 and Boris, two characters crossing, rapid hand actions and torso re-orientation."
+        }
+      ]
+    },
+    {
+      "id": "ZvGrphHH3xA",
+      "url": "https://www.youtube.com/watch?v=ZvGrphHH3xA",
+      "title": "Sintel (Project Durian) (2010, The Blender Foundation) 4k",
+      "author": "The Blender Foundation",
+      "duration_seconds": 888,
+      "resolution": "3840x2160 (4K UHD)",
+      "license": "Creative Commons Attribution 3.0 (CC-BY 3.0)",
+      "license_evidence": "Description: 'Blender Foundation licensed under the Creative Commons Attribution 3.0 license.'",
+      "download_source": "Blender Foundation open movie archive",
+      "subject_type": "Stylized human character (Sintel, female protagonist)",
+      "status": "eligible",
+      "proposed_clips": [
+        {
+          "clip_id": "clip_sintel_01",
+          "category": [
+            "dark_cut",
+            "fast_motion"
+          ],
+          "target_subject": "Sintel (female warrior)",
+          "start_seconds": 30,
+          "end_seconds": 75,
+          "duration_seconds": 45,
+          "description": "Blizzard encounter: Sintel fighting bandit in dark blizzard, rapid staff strikes, camera cuts, high motion displacement."
+        }
+      ]
+    }
+  ],
+  "rejected": [
+    {
+      "id": "ZXsQAXx_ao0",
+      "title": "Shia LaBeouf Just Do It Motivational Speech",
+      "reason": "Rejected: Maximum resolution is 1080p, does not meet the 3840x2160 (4K) requirement."
+    },
+    {
+      "id": "yxxhC7T7n0s",
+      "title": "People crossing the street",
+      "reason": "Rejected: Commercial use allowed but reselling forbidden (Payhip download link); licensing terms ambiguous/non-standard Creative Commons."
+    },
+    {
+      "id": "_cMxraX_5RE",
+      "title": "Sprite Fright - Blender Open Movie",
+      "reason": "Rejected: YouTube stream capped at 1080p, does not meet 4K requirement."
+    },
+    {
+      "id": "gxIU0uU0yGM",
+      "title": "Big Buck Bunny 4K 60fps",
+      "reason": "Rejected: Animal subjects only; lacks human subjects for face/pose/shoulder tracking evaluation."
+    },
+    {
+      "id": "p6VZgrp4kQA",
+      "title": "Panasonic LUMIX GH6 - Free Sample Footage Download",
+      "reason": "Rejected: Non-standard license restricting use ('only for you to play around with, not in any project without approval')."
+    }
+  ]
+}

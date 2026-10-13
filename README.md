@@ -68,9 +68,7 @@ A fresh GPU environment needs a matching CUDA-enabled PyTorch/torchvision instal
 ### TorchCodec：分兩階段啟用
 
 預設仍使用 OpenCV。TorchCodec 路徑需另裝與 PyTorch／CUDA 相符的 wheel，
-並提供 FFmpeg shared libraries；目前本機驗證為 Python 3.13.5、PyTorch 2.11.0+cpu、
-TorchCodec 0.17.0+cpu。T4／NVDEC 的正確性、速度與記憶體峰值須另行實測。
-
+並提供 FFmpeg shared libraries。已於 2026-10-13 在 Google Colab Tesla T4 GPU 完成真實硬體全流程驗證（Python 3.13.15, PyTorch 2.11.0+cu130, TorchCodec 0.17.0+cu130, NVDEC 硬解無 fallback, HEVC NVENC 硬體編碼）。
 ```bash
 # 第一階段：NVDEC 解碼，模型與輸出維持 NumPy reference 路徑
 auto_reframe.py input.mp4 stage1.mp4 --device 0 --saliency-device cuda \
@@ -86,10 +84,8 @@ auto_reframe.py input.mp4 stage2.mp4 --device 0 --saliency-device cuda \
 `--save-debug-preview` 會額外下載完整原圖。GPU 色彩轉換與插值可能改變部分模型結果，需比較視覺焦點。
 變動幀率來源會明確拒絕，避免套用固定 FPS 後改變播放速度。
 
-請使用 [T4 測試規格](docs/t4-validation.md) 先短測再測長片；
-[AI agent 交接文件](docs/agent-handoff.md) 記錄目前實作、測試入口及下一步。
-已完成本機驗證與歷史量測保留在 [驗證報表](docs/reports/implementation-validation-2026-10-12.md)，
-新 GPU 路徑仍須依規格集中驗證。
+相關測試規範請見 [T4 測試規格](docs/t4-validation.md)；[AI agent 交接文件](docs/agent-handoff.md) 記錄完整實作與測試入口。
+最新真實 GPU 與 4K 驗證報表請見 [T4 GPU 驗證報表](docs/reports/t4-2026-10-13-gpu-verified.md) 與 [YouTube 4K 人像驗證報表](docs/reports/youtube-validation-2026-10-13-3079cd0d9549.md)。
 
 方案 B 的主角排程、有限姿態快取與追蹤 profile 已接入，設定與相容遷移見
 [交接文件](docs/agent-handoff.md)。離線雙向插值 C 尚未實作。

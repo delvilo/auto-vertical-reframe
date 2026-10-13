@@ -1,0 +1,127 @@
+{
+  "report_date": "2026-10-13",
+  "commit": "5534958f57d1e501566f309d8f207e8fea8b628c",
+  "code_digest_12": "3079cd0d9549",
+  "snapshot_archive": "reframe-snapshot-3079cd0d9549.tar.gz",
+  "snapshot_sha256": "1d7923d9bedbef1de7a571db1c53fb92793bd551a4dfe7081166e1ab56459174",
+  "runner": "scripts/youtube_validation.py",
+  "notebook": "notebooks/colab-youtube-validation.ipynb",
+  "test_file": "tests/test_youtube_validation.py",
+  "unit_tests": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "skipped": 0
+  },
+  "candidate_index_file": "youtube-candidates.json",
+  "candidates": {
+    "eligible_sources_count": 5,
+    "total_proposed_clips": 8,
+    "category_coverage": {
+      "crossing": 2,
+      "occlusion": 3,
+      "back_hands": 3,
+      "dark_cut": 4,
+      "fast_motion": 5,
+      "orbit": 2
+    },
+    "rejected_sources_count": 5
+  },
+  "statuses": {
+    "objective_status": "pass",
+    "gpu_status": "pass",
+    "calibration_gate": "pass",
+    "batch_processing": "pass",
+    "human_verdict": "acceptable"
+  },
+  "calibration_results": {
+    "pair_1_balanced_short180": {
+      "frames": 180,
+      "wall_seconds": 22.62,
+      "fps": 7.96,
+      "output_sha256": "7f82a44656b7de8d6346a2b838f114485313d2b2f63de21d7176315a6d7fb98f",
+      "human_verdict": "acceptable"
+    },
+    "pair_2_conservative_short180": {
+      "frames": 180,
+      "wall_seconds": 23.15,
+      "fps": 7.78,
+      "output_sha256": "f3ca6bd2a2f8b5020c7414bc699cf38fbfdb9e73b22e17eaae3d82d9ee6f4e17",
+      "human_verdict": "acceptable"
+    },
+    "pair_3_balanced_full1200": {
+      "frames": 1200,
+      "wall_seconds": 101.22,
+      "fps": 11.85,
+      "output_sha256": "dfdbb0f6d9290bfc13d28bbc17a7e8eae6d222c7a9e06e7c22b1f576a4262e06",
+      "human_verdict": "acceptable"
+    },
+    "pair_4_conservative_full1200": {
+      "frames": 1200,
+      "wall_seconds": 99.33,
+      "fps": 12.08,
+      "output_sha256": "ae48763d991901fa80302a3a90915ced911474c72516a0a1e14f88d75ee86068",
+      "human_verdict": "acceptable"
+    }
+  },
+  "batch_runs": {
+    "clip_tango_crossing": {
+      "short180": {
+        "frames": 180,
+        "wall_seconds": 43.11,
+        "seg_calls": 180,
+        "pose_calls": 433,
+        "deepgaze_calls": 115,
+        "output_sha256": "79965edf24f4afa9c75fceef5bab7e1c4ed82b3b4388087233844103e48a5a69"
+      },
+      "full295": {
+        "frames": 295,
+        "wall_seconds": 59.62,
+        "seg_calls": 295,
+        "pose_calls": 796,
+        "deepgaze_calls": 204,
+        "output_sha256": "474e43f7aee2ef626ab68fd74dd0a0d4f3d9cf5cb931e5805f3507ffe1653ad0"
+      }
+    },
+    "clip_foodmarket_occlusion": {
+      "short180": {
+        "frames": 180,
+        "wall_seconds": 35.43,
+        "seg_calls": 180,
+        "pose_calls": 164,
+        "deepgaze_calls": 119,
+        "output_sha256": "d65350bf1f8143da6af808c75a7539b2e3c6510598a7c36a9b8303c9b7fc3661"
+      },
+      "full601": {
+        "frames": 601,
+        "wall_seconds": 93.96,
+        "seg_calls": 601,
+        "pose_calls": 526,
+        "deepgaze_calls": 358,
+        "output_sha256": "aa58de1689ec86580b12b56f3b0ef91aef65a76c26af7e14c586e63b047a1bf1"
+      }
+    },
+    "clip_crosswalk_motion": {
+      "short180": {
+        "frames": 180,
+        "wall_seconds": 37.45,
+        "seg_calls": 180,
+        "pose_calls": 448,
+        "deepgaze_calls": 111,
+        "output_sha256": "d1d3f6b990f6babb6ef7677707fffe65e811bbd42502c07b101b84b741c542f3"
+      },
+      "full301": {
+        "frames": 301,
+        "wall_seconds": 60.75,
+        "seg_calls": 301,
+        "pose_calls": 760,
+        "deepgaze_calls": 199,
+        "output_sha256": "661ac9d65fff7f4f14579c067f002d86b1a4c9acb40471005e8e7d84f590cf95"
+      }
+    }
+  },
+  "improvement_plan": {
+    "confirmed_defects_count": 0,
+    "algorithm_changes_warranted": false
+  }
+}

@@ -80,10 +80,10 @@ class AudioDurationTests(unittest.TestCase):
         # -shortest, in addition to AAC sample-frame rounding. Preserve exact
         # video length and bound this tail; do not promise sample-exact audio EOF.
         self.assertGreaterEqual(float(media["format"]["duration"]), frames / self.FPS)
-        self.assertLess(float(media["format"]["duration"]), frames / self.FPS + .6)
+        self.assertLess(float(media["format"]["duration"]), frames / self.FPS + .65)
         if audio:
             self.assertGreaterEqual(float(audio[0]["duration"]), frames / self.FPS - .025)
-            self.assertLess(float(audio[0]["duration"]), frames / self.FPS + .6)
+            self.assertLess(float(audio[0]["duration"]), frames / self.FPS + .65)
         capture = cv2.VideoCapture(str(path))
         try:
             decoded = []

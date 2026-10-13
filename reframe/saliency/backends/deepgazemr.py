@@ -218,7 +218,7 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
                 chw = self._preprocess_frame(self.cpu_ring[i])
                 self.host_ring[i].copy_(torch.from_numpy(chw))
             self.tensor_ring[i].copy_(self.host_ring[i], non_blocking=cuda)
-            self.tensor_ring[i + 16].copy_(self.tensor_ring[i])
+            self.tensor_ring[i + 16].copy_(self.tensor_ring[i], non_blocking=cuda)
             if cuda:
                 event = torch.cuda.Event()
                 event.record()
@@ -246,6 +246,7 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
                 continue
             end = index + count
             pixels = source[index:end]
+            cuda = self.device_name.startswith("cuda")
             # A deliberately different saliency device copies only the small
             # uint8 observation. Same-device CUDA processing never downloads it.
             if pixels.device != self.tensor_ring.device:
@@ -254,12 +255,12 @@ class DeepGazeMRSaliencyHelper(SaliencyBackend):
                 self.tensor_cross_device_copies += count
                 self.tensor_cross_device_bytes += pixels.numel() * pixels.element_size()
                 self.tensor_cross_device_batches += 1
-                pixels = pixels.to(device=self.tensor_ring.device)
+                pixels = pixels.to(device=self.tensor_ring.device, non_blocking=cuda)
             with self._timings.measure("preprocess"):
                 self._preprocess_tensor_frame(pixels, out=self.tensor_ring[index:end])
                 self.tensor_preprocessed_frames += count
                 self.tensor_preprocess_batches += 1
-            self.tensor_ring[index + 16:end + 16].copy_(self.tensor_ring[index:end])
+            self.tensor_ring[index + 16:end + 16].copy_(self.tensor_ring[index:end], non_blocking=cuda)
         self._device_sequence = self._temporal_sequence
 
     def _inference_failure(self, exc: Exception) -> None:
