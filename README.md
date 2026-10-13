@@ -35,7 +35,7 @@ Naive center-cropping loses the subject the moment they move; manual reframing i
 - **Two-Person Framing Mode**: Automatically widens composition when a secondary subject crosses a spatial threshold.
 - **Pose-First Three-Tier Composition**: Stable subjects compose directly from pose and segmentation masks; uncertain scenes escalate to DeepGaze MR.
 - **Lean On-Demand DeepGaze MR**: Loads only the feature extraction checkpoint (avoiding the 548 MB ImageNet VGG download) across a continuous 16-frame temporal window.
-- **Staged TorchCodec Video Pipeline**: Supports NVDEC hardware decoding and end-to-end GPU Tensor image processing with explicit CPU fallback detection.
+- **Default TorchCodec Video Pipeline with Fallback**: Decodes sequentially via TorchCodec (NVDEC on CUDA) by default with transparent startup OpenCV fallback; supports end-to-end GPU Tensor image processing with explicit CPU fallback detection.
 - **Detailed Telemetry Diagnostics**: Reports tier decisions, real model invocations, cache ages, and hardware placement in the final Summary.
 - **Camera Motion Controls**: Subject lock, min/max zoom, max step-per-frame, per-axis damping, and dead zones.
 - **FFmpeg Encoding Control**: Custom video encoder (including `hevc_nvenc`), CRF, audio bitrate, and optional post-processing filters.
@@ -52,7 +52,7 @@ Naive center-cropping loses the subject the moment they move; manual reframing i
 - **Pose & Head Cues:** YOLO26n-pose (`yolo26n-pose.pt`)
 - **Scene Detection:** PySceneDetect
 - **ML Runtime:** PyTorch 2.11+ (CUDA, CPU, MPS)
-- **Video Processing:** FFmpeg (CLI) and optional TorchCodec (NVDEC)
+- **Video Processing:** TorchCodec (NVDEC default, startup OpenCV fallback) and FFmpeg (CLI)
 
 ---
 
@@ -71,27 +71,36 @@ Development targets **Python 3.13+** as the compatibility baseline (`requires-py
 
 ---
 
-### TorchCodec: Two-Stage Activation
+### Video Decoding: Default TorchCodec with OpenCV Fallback
 
-The default decoder remains OpenCV. The TorchCodec path requires installing the matching PyTorch / CUDA wheel (e.g. TorchCodec 0.17.0 cu130) with FFmpeg shared libraries. Fully validated on a Google Colab Tesla T4 GPU on 2026-10-13 (Python 3.13.15, PyTorch 2.11.0+cu130, TorchCodec 0.17.0+cu130, NVDEC hardware decoding verified with zero CPU fallback, HEVC NVENC encoding):
+The default video decoder is `torchcodec` (targeting `--decode-device cuda:0` with `--decode-batch-size 4`). TorchCodec requires a matching PyTorch / CUDA wheel (e.g. TorchCodec 0.17.0 cu130) and FFmpeg shared libraries. Note that the 2026-10-13 Google Colab Tesla T4 verification report (Python 3.13.15, PyTorch 2.11.0+cu130, TorchCodec 0.17.0+cu130, NVDEC hardware decoding verified with zero CPU fallback, HEVC NVENC encoding) represents historical baseline evidence for the opt-in implementation, not proof of the new default/fallback pipeline. The user reported Colab test success, but provided no new version logs or runtime evidence.
+
+#### Startup Fallback & Fault Tolerance
+
+1. **Startup Fallback**: If TorchCodec fails during import, initialization, or first batch validation (due to `ImportError`, `OSError`, `RuntimeError`, `TypeError`, or `AssertionError`), the pipeline logs a warning with full native exception traceback (`logging.warning(exc_info=True)`) and falls back transparently to OpenCV starting from frame 1.
+2. **Tensor Processing Downgrade**: If `--frame-processing tensor` is requested but TorchCodec startup fails, frame processing explicitly downgrades to `reference` (NumPy model/render path).
+3. **Explicit OpenCV Override**: To bypass TorchCodec probing entirely and decode directly via OpenCV, pass `--video-decoder opencv`.
+4. **Strict Fatal Failures**: Variable frame rate (VFR / `ValueError`) inputs and any midstream decode failures (occurring after startup validation) remain strictly fatal and never trigger fallback.
+5. **Telemetry & Summary Fields**: The final Summary `video_io` block records `requested_decoder`, `requested_frame_processing`, `decoder_fallback` (`bool`), and `decoder_fallback_reason` (`str` or `null`). The `decoder` and `frame_processing` fields report the actual executed pipeline. Native CUDA `cpu_fallback` status remains separate and unchanged.
+6. **Strict Hardware Validation**: Benchmark runners and collector scripts (`scripts/colab_torchcodec.py`, `scripts/youtube_validation.py`) enforce stricter assertions than routine production runs; they verify actual NVDEC placement (`nvdec_verified`) and reject silent fallback to CPU or OpenCV.
 
 ```bash
-# Stage 1: NVDEC hardware decoding, reference NumPy model/render path
-auto_reframe.py input.mp4 stage1.mp4 --device 0 --saliency-device cuda \
-  --video-decoder torchcodec --decode-device cuda:0 --decode-batch-size 4
+# Default (Stage 1): TorchCodec sequential decoding (defaults to --decode-device cuda:0), reference NumPy model/render path
+auto_reframe.py input.mp4 stage1.mp4 --device 0 --saliency-device cuda
 
 # Stage 2: Tensor preprocessing on GPU, DeepGaze small tensor window, GPU crop/resize
 auto_reframe.py input.mp4 stage2.mp4 --device 0 --saliency-device cuda \
-  --video-decoder torchcodec --decode-device cuda:0 --decode-batch-size 4 \
   --frame-processing tensor
+
+# Explicit OpenCV: Bypass TorchCodec probing directly
+auto_reframe.py input.mp4 baseline.mp4 --device 0 --video-decoder opencv
 ```
 
-Both stages preserve audio synchronization, source frame counts, and presentation timestamps; `precrop` only restricts the inference region. Stage 2 supports PyTorch `.pt` YOLO checkpoints and ByteTrack. Variable frame rate (VFR) inputs are rejected to avoid playback speed distortion.
+Both pipelines preserve audio synchronization and source frame counts; `precrop` only restricts the inference region. Stage 2 supports PyTorch `.pt` YOLO checkpoints and ByteTrack. Presentation timestamp validation differs across backends: TorchCodec explicitly validates sequential presentation timestamps and rejects non-CFR (variable frame rate / VFR) streams; OpenCV decodes using the container's reported FPS and cannot establish presentation timestamp validation.
 
 See [T4 Validation Specification](docs/t4-validation.md) and [AI Agent Handoff](docs/agent-handoff.md) for full execution guidelines. The latest hardware reports are available at [T4 GPU Verification Report](docs/reports/t4-2026-10-13-gpu-verified.md) and [YouTube 4K Portrait Validation Report](docs/reports/youtube-validation-2026-10-13-3079cd0d9549.md).
 
 Scheme B tracking profiles and pose caching are fully integrated; `--dead-zone` defaults to `0` across all presets.
-
 ---
 
 ### Colab Environment Setup & Installation

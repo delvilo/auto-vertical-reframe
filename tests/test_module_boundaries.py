@@ -96,8 +96,11 @@ assert seen
 
 
 class PipelineLifetimeTests(unittest.TestCase):
-    def run_pipeline(self, failure=None):
-        args = config.apply_preset(cli.parse_args(["input.mp4", "output.mp4", "--max-missed-frames", "0"]))
+    def run_pipeline(self, failure=None, decoder_error=None):
+        decoder_options = (["--frame-processing", "tensor"] if decoder_error is not None
+                           else ["--video-decoder", "opencv"])
+        args = config.apply_preset(cli.parse_args(
+            ["input.mp4", "output.mp4", "--max-missed-frames", "0", *decoder_options]))
         capture = MagicMock()
         capture.isOpened.return_value = True
         props = {pipeline.cv2.CAP_PROP_FPS: 30, pipeline.cv2.CAP_PROP_FRAME_WIDTH: 400,
@@ -124,6 +127,7 @@ class PipelineLifetimeTests(unittest.TestCase):
         writer.write.side_effect = failure
         frames = ((i, np.zeros((240, 400, 3), np.uint8)) for i in range(1, 4))
         with patch.object(pipeline.cv2, "VideoCapture", return_value=capture), \
+                patch("reframe.torchcodec_reader.TorchCodecReader", side_effect=decoder_error), \
                 patch.object(pipeline, "SegmentationTracker", return_value=tracker), \
                 patch.object(pipeline, "PoseCueCache", return_value=pose_cache), \
                 patch.object(pipeline, "YOLOPoseHelper"), \
@@ -150,6 +154,18 @@ class PipelineLifetimeTests(unittest.TestCase):
         writer.abort.assert_called_once()
         capture.release.assert_called_once()
         self.assertIsNone(frames.gi_frame)
+        if failure is None:
+            return summary, logs.output
+
+    def test_tensor_startup_fallback_finishes_in_reference_mode_with_explicit_summary(self):
+        summary, logs = self.run_pipeline(decoder_error=RuntimeError("NVDEC unavailable"))
+        video_io = summary["video_io"]
+        self.assertEqual(video_io["decoder"], "opencv")
+        self.assertEqual(video_io["frame_processing"], "reference")
+        self.assertEqual(video_io["requested_frame_processing"], "tensor")
+        self.assertTrue(video_io["decoder_fallback"])
+        self.assertIn("NVDEC unavailable", video_io["decoder_fallback_reason"])
+        self.assertIn("Traceback", "\n".join(logs))
 
     def test_empty_scene_exercises_lost_subject_path_and_cleanup(self):
         self.run_pipeline()
@@ -160,7 +176,7 @@ class PipelineLifetimeTests(unittest.TestCase):
                 self.run_pipeline(failure)
 
     def test_early_pose_initialization_error_closes_already_created_models(self):
-        args = config.apply_preset(cli.parse_args(["in.mp4", "out.mp4"]))
+        args = config.apply_preset(cli.parse_args(["in.mp4", "out.mp4", "--video-decoder", "opencv"]))
         capture = MagicMock()
         capture.isOpened.return_value = True
         capture.get.return_value = 128

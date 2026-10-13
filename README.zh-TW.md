@@ -35,7 +35,7 @@
 - **雙人取景模式**：次要人物跨越空間門檻時自動納入雙人構圖。
 - **姿態優先三級策略**：穩定人物直接由姿態與遮罩構圖，不確定場景才升級至 DeepGaze MR。
 - **精簡按需 DeepGaze MR**：僅載入特徵權重（省去 548 MB ImageNet VGG 下載），需要時觀測連續 16 幀時序窗口。
-- **可選分階段 TorchCodec 資料流**：支援 NVDEC 硬體解碼與端到端 GPU Tensor 影像處理，具備明確的 CPU fallback 檢測。
+- **預設 TorchCodec 資料流與自動 Fallback**：預設採用 TorchCodec（CUDA 下使用 NVDEC）順序解碼，啟動失敗自動回退至 OpenCV；支援端到端 GPU Tensor 影像處理與明確的 CPU fallback 檢測。
 - **完整 Telemetry 診斷**：於終端 Summary 輸出層級決策次數、真實神經網路呼叫、快取年齡與硬體裝置狀態。
 - **相機運動約束**：支援首主角鎖定、最小／最大縮放、單幀最大位移、雙軸阻尼與自訂防抖死區。
 - **FFmpeg 彈性後製**：可自訂編碼器（支援 `hevc_nvenc`）、CRF、音訊位元率及可選濾鏡。
@@ -52,7 +52,7 @@
 - **姿態與人像線索**：YOLO26n-pose (`yolo26n-pose.pt`)
 - **切鏡偵測**：PySceneDetect
 - **機器學習框架**：PyTorch 2.11+（支援 CUDA、CPU、MPS）
-- **視訊編解碼**：FFmpeg (CLI) 與可選之 TorchCodec (NVDEC)
+- **視訊編解碼**：TorchCodec（預設 NVDEC，啟動失敗自動回退 OpenCV）與 FFmpeg (CLI)
 
 ---
 
@@ -71,27 +71,36 @@ auto_reframe.py input.mp4 output.mp4 --device auto
 
 ---
 
-### TorchCodec：分兩階段啟用
+### 影像解碼：預設 TorchCodec 與 OpenCV 回退機制
 
-預設影像解碼仍使用 OpenCV。TorchCodec 路徑需安裝與 PyTorch / CUDA 建置版本相符的 wheel（例如 TorchCodec 0.17.0 cu130）並提供 FFmpeg shared libraries。已於 2026-10-13 在 Google Colab Tesla T4 GPU 完成真實硬體全流程驗證（Python 3.13.15, PyTorch 2.11.0+cu130, TorchCodec 0.17.0+cu130, NVDEC 硬解無 fallback, HEVC NVENC 硬體編碼）：
+系統預設影像解碼器為 `torchcodec`（預設 `--decode-device cuda:0`、`--decode-batch-size 4`）。TorchCodec 需安裝與 PyTorch / CUDA 建置版本相符的 wheel（例如 TorchCodec 0.17.0 cu130）並提供 FFmpeg shared libraries。需特別注意：2026-10-13 在 Google Colab Tesla T4 GPU 的硬體驗證報表（Python 3.13.15, PyTorch 2.11.0+cu130, TorchCodec 0.17.0+cu130, NVDEC 硬解無 fallback, HEVC NVENC 硬體編碼）為先前 opt-in 實作之歷史回報證據，而非本次新版預設／回退邏輯的實機證明。使用者回報測試成功，但未附帶新版本日誌或執行細節。
+
+#### 啟動回退與容錯行為
+
+1. **啟動階段回退**：若 TorchCodec 在模組載入、初始化或首批次校驗時失敗（攔截 `ImportError`、`OSError`、`RuntimeError`、`TypeError`、`AssertionError`），系統會記錄警告日誌與完整錯誤堆疊（`logging.warning(exc_info=True)`），並自動無縫回退至 OpenCV 自第 1 幀開始解碼。
+2. **Tensor 處理降級**：若啟用 `--frame-processing tensor`，在解碼器啟動回退至 OpenCV 時，影像處理模式會明確自動降級為 `reference`（NumPy 模型與渲染路徑）。
+3. **明確指定 OpenCV**：若需完全略過 TorchCodec 探測，可顯式傳入 `--video-decoder opencv`。
+4. **致命錯誤中斷**：變動幀率（VFR／`ValueError`）及解碼中途發生的任何錯誤（首批驗證之後）維持嚴格中斷（fatal），不進行隱式回退。
+5. **Telemetry 診斷欄位**：終端 Summary 的 `video_io` 新增 `requested_decoder`、`requested_frame_processing`、`decoder_fallback`（布林值）與 `decoder_fallback_reason`（字串或 null）；`decoder` 與 `frame_processing` 則如實反映實際運作路徑。原生 CUDA `cpu_fallback` 診斷維持獨立不變。
+6. **硬體驗證嚴格度**：自動化評測與收集器腳本（`scripts/colab_torchcodec.py`、`scripts/youtube_validation.py`）要求高於一般日常執行，會檢驗實際解碼硬體狀態（要求 `nvdec_verified`），嚴格拒絕任何回退至 CPU 或 OpenCV。
 
 ```bash
-# 第一階段：NVDEC 解碼，模型與輸出維持 NumPy reference 路徑
-auto_reframe.py input.mp4 stage1.mp4 --device 0 --saliency-device cuda \
-  --video-decoder torchcodec --decode-device cuda:0 --decode-batch-size 4
+# 預設行為（第一階段）：TorchCodec 順序解碼（預設 --decode-device cuda:0），NumPy reference 模型與渲染路徑
+auto_reframe.py input.mp4 stage1.mp4 --device 0 --saliency-device cuda
 
 # 第二階段：另啟用 GPU precrop／YOLO 前處理、DeepGaze 小圖窗口、裁切與縮放
 auto_reframe.py input.mp4 stage2.mp4 --device 0 --saliency-device cuda \
-  --video-decoder torchcodec --decode-device cuda:0 --decode-batch-size 4 \
   --frame-processing tensor
+
+# 明確指定 OpenCV：跳過 TorchCodec 探測直接使用 OpenCV
+auto_reframe.py input.mp4 baseline.mp4 --device 0 --video-decoder opencv
 ```
 
-兩階段均保留 FFmpeg / NVENC 音訊合成與原始影格數、FPS；`precrop` 仍只限制推論區域。第二階段目前支援 PyTorch `.pt` YOLO 模型及 ByteTrack。若來源包含變動幀率（VFR），系統會明確拒絕以避免播放速度失真。
+兩階段均保留 FFmpeg / NVENC 音訊合成與原始影格數；`precrop` 仍只限制推論區域。第二階段目前支援 PyTorch `.pt` YOLO 模型及 ByteTrack。時戳與幀率校驗方面：TorchCodec 會逐幀嚴格校驗顯示時戳並拒絕非 CFR 串流（拒絕變動幀率 VFR 輸入，避免播放速度失真）；OpenCV 解碼則直接依賴容器回報之 FPS，無法建立逐幀時戳校驗。
 
 相關測試規範請見 [T4 測試規格](docs/t4-validation.md)；[AI agent 交接文件](docs/agent-handoff.md) 記錄完整實作與測試入口。最新真實 GPU 與 4K 驗證報表請見 [T4 GPU 驗證報表](docs/reports/t4-2026-10-13-gpu-verified.md) 與 [YouTube 4K 人像驗證報表](docs/reports/youtube-validation-2026-10-13-3079cd0d9549.md)。
 
 方案 B 的主角排程、有限姿態快取與追蹤 profile 已全面接入；`--dead-zone` 所有 preset 預設為 `0`，可自行指定非零值。
-
 ---
 
 ### Colab 環境配置與安裝

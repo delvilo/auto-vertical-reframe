@@ -63,14 +63,14 @@ def parse_args(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument("--device",
                         help="YOLO inference device: auto, cpu, mps, cuda, cuda:N, or GPU index N")
     parser.add_argument("--video-decoder", choices=("opencv", "torchcodec"),
-                        help="Optional TorchCodec exact sequential decoding; default: opencv")
+                        help="Sequential decoder (default: torchcodec); startup failures fall back to OpenCV")
     parser.add_argument("--decode-device",
-                        help="TorchCodec device: cpu or cuda:N (default cuda:0); CUDA fallback is fatal")
+                        help="TorchCodec device: cpu or cuda:N (default cuda:0); unverified CUDA startup falls back to OpenCV")
     parser.add_argument("--decode-batch-size", type=int,
                         help="TorchCodec bounded decode batch, 1..8 source frames (default 4)")
     parser.add_argument("--frame-processing", choices=("reference", "tensor"),
-                        help="Stage 1 keeps NumPy models/render (reference, default); "
-                             "stage 2 uses tensor model inputs and rendering (requires TorchCodec)")
+                        help="NumPy models/render (reference, default), or tensor model inputs/rendering; "
+                             "OpenCV startup fallback switches tensor to reference")
 
     parser.add_argument("--seg-model")
     parser.add_argument("--tracker")

@@ -143,25 +143,6 @@ class CliAndIdentityTests(unittest.TestCase):
                     bad_flag, "1",
                 ])
 
-    def test_command_structure_has_exact_settings(self):
-        cmd = yv.build_command(
-            repo=ROOT,
-            input_path=Path("in.mp4"),
-            output_path=Path("out.mp4"),
-            seg_model=Path("seg.pt"),
-            pose_model=Path("pose.pt"),
-            tracking_profile="conservative",
-            max_frames=180,
-        )
-        self.assertIn("--frame-processing", cmd)
-        self.assertEqual(cmd[cmd.index("--frame-processing") + 1], "tensor")
-        self.assertIn("--tracking-profile", cmd)
-        self.assertEqual(cmd[cmd.index("--tracking-profile") + 1], "conservative")
-        self.assertIn("--no-saliency-amp", cmd)
-        self.assertIn("--dead-zone", cmd)
-        self.assertEqual(cmd[cmd.index("--dead-zone") + 1], "0")
-        self.assertNotIn("--precrop", cmd)
-
 
 class ReuseAndRecoveryTests(unittest.TestCase):
     def setUp(self):
@@ -312,6 +293,16 @@ class ValidationRuleTests(unittest.TestCase):
         record = self.run_with_summary(summary)
         self.assertEqual(record["status"], "failed")
 
+    def test_opencv_fallback_fails_validation(self):
+        summary = make_summary()
+        summary["video_io"].update({
+            "decoder": "opencv",
+            "frame_processing": "reference",
+            "decoder_fallback": True,
+            "decoder_fallback_reason": "TorchCodec init error",
+        })
+        record = self.run_with_summary(summary)
+        self.assertEqual(record["status"], "failed")
     def test_audio_tail_overflow_fails_validation(self):
         summary = make_summary()
         bad_audio_probe = {

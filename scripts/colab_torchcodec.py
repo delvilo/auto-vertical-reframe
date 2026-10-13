@@ -98,9 +98,13 @@ def validate_decoder(summary: dict, profile: str, requested: str) -> dict:
     decoder, processing = PROFILES[profile]
     if io.get("decoder") != decoder or io.get("frame_processing") != processing:
         raise ValueError("Decoder/frame-processing telemetry differs from requested profile")
+    if io.get("decoder_fallback"):
+        raise ValueError(f"Decoder fallback occurred: {io.get('decoder_fallback_reason')}")
     result = {key: io.get(key) for key in ("decoder", "frame_processing", "requested_device",
               "actual_device", "cpu_fallback", "cpu_fallback_status_known", "frames_decoded",
-              "frames_yielded", "decode_wall_seconds", "initialization_wall_seconds")}
+              "frames_yielded", "decode_wall_seconds", "initialization_wall_seconds",
+              "requested_decoder", "requested_frame_processing", "decoder_fallback",
+              "decoder_fallback_reason")}
     if decoder == "opencv":
         if io.get("actual_device") != "cpu":
             raise ValueError("OpenCV baseline must explicitly report CPU decoding")
@@ -165,9 +169,9 @@ def command(args, profile, output):
     benchmark = collector(args.repo)
     tracking = tracking_settings(args)
     case = (profile, tracking["seg_max_gap"], "lazy", "gray-area", tracking["seg_skip_policy"])
-    result = benchmark.command(args, output, case)
     decoder, processing = PROFILES[profile]
-    result += ["--video-decoder", decoder, "--frame-processing", processing,
+    result = benchmark.command(args, output, case, video_decoder=decoder)
+    result += ["--frame-processing", processing,
                "--decode-device", args.decode_device, "--decode-batch-size", str(args.decode_batch_size)]
     return result
 

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 def _open_decoder(path: str | Path, device: str):
-    # Keep TorchCodec and its FFmpeg shared-library loading off the default path.
+    # Load native TorchCodec/FFmpeg libraries only when this decoder is opened.
     from torchcodec.decoders import VideoDecoder
 
     return VideoDecoder(

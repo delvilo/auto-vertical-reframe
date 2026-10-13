@@ -1,7 +1,7 @@
 # T4 GPU 驗證規格與執行順序
 
-更新：2026-10-13（Asia/Taipei）。本規格之完整真實 T4 GPU 執行已於 2026-10-13 由 `colab-operator` 驗證完成，詳細數據見
-[T4 GPU 全流程真實驗證報表](reports/t4-2026-10-13-gpu-verified.md) 與 [YouTube 4K 人像驗證報表](reports/youtube-validation-2026-10-13-3079cd0d9549.md)。
+更新：2026-10-13（Asia/Taipei）。本規格先前針對 opt-in 實作之完整真實 T4 GPU 執行已於 2026-10-13 由 `colab-operator` 驗證完成，詳細數據見
+[T4 GPU 全流程真實驗證報表](reports/t4-2026-10-13-gpu-verified.md) 與 [YouTube 4K 人像驗證報表](reports/youtube-validation-2026-10-13-3079cd0d9549.md)（此為歷史回報證據，非本次預設／回退新架構之證明；使用者回報成功但未附帶新版本日誌）。
 本文件保留作為後續排查、重測與量測準則之規格基準。
 ## 1. 固定比較條件
 
@@ -21,6 +21,8 @@
 | `baseline` | OpenCV／CPU | reference NumPy；模型仍要求 CUDA |
 | `stage1` | TorchCodec／NVDEC | reference，隔離解碼路徑影響 |
 | `stage2` | TorchCodec／NVDEC | tensor／GPU 影像處理 |
+
+一般 CLI 預設影像解碼器為 `torchcodec`（`--decode-device cuda:0`、`--decode-batch-size 4`），啟動階段（模組載入、初始化或首批次驗證）失敗時自動記錄堆疊並回退至 OpenCV，且若指定 `--frame-processing tensor` 則自動降級為 `reference`。`baseline` 資料流則明確傳入 `--video-decoder opencv` 略過 TorchCodec 探測。來源為變動幀率（VFR／`ValueError`）或解碼中途發生錯誤維持嚴格中斷（fatal）。時戳校驗方面：TorchCodec 會逐幀嚴格校驗顯示時戳並拒絕非 CFR 串流；OpenCV 解碼則依賴容器回報之 FPS，無法建立逐幀時戳校驗。
 
 | 追蹤 profile | YOLO 候選 gap 上限 | 真實分割期限 | Pose 軟更新／硬期限 |
 | --- | --- | --- | --- |
@@ -102,6 +104,8 @@ PY
 收集器還會以實際來源建立 NVDEC decoder、取得影格並檢查 fallback，另試跑指定 NVENC encoder。
 NVDEC 必須回報 `cpu_fallback=false` **且** `cpu_fallback_status_known=true`；CUDA tensor 本身不證明硬解。
 GPU 比較不加 `--allow-cpu-diagnostic`，也不偷偷改用 CPU decoder／模型或軟體 encoder。
+
+**硬體驗證與日常執行的嚴格度差異**：日常 CLI 允許 TorchCodec 啟動失敗時自動回退至 OpenCV，但 T4 硬體驗證與效能收集器（`scripts/colab_torchcodec.py`、`scripts/youtube_validation.py`）之驗收標準嚴於一般執行。收集器透過 `validate_decoder` 嚴格檢驗 `video_io` 之實際欄位，要求 `stage1`／`stage2` 必須為真實 `torchcodec` 解碼且確認 `nvdec_verified`，直接拒絕任何啟動回退至 OpenCV 或 CPU 解碼。Summary `video_io` 會完整記錄 `requested_decoder`、`requested_frame_processing`、`decoder_fallback` 與 `decoder_fallback_reason` 以供審計。
 
 ## 3. 先跑既有測試，再補真實 GPU 缺口
 

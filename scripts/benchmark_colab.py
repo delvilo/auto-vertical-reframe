@@ -428,10 +428,11 @@ def frame_limit(args, warmup: bool = False) -> int | None:
     return getattr(args, "max_frames", None)
 
 
-def command(args, output: Path, case: tuple, warmup: bool = False) -> list[str]:
+def command(args, output: Path, case: tuple, warmup: bool = False, video_decoder: str = "opencv") -> list[str]:
     _, gap, mode, method, policy = case
     tracking = tracking_settings(args)
     result = [sys.executable, "-u", "-m", "reframe", str(args.input), str(output),
+            "--video-decoder", video_decoder,
             "--seg-model", args.seg_model, "--pose-model", args.pose_model,
             "--device", args.device, "--saliency-device", args.saliency_device,
             "--precrop", "middle", "--lock-first-subject", "--dead-zone", str(getattr(args, "dead_zone", 0.0)),

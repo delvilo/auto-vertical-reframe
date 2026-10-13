@@ -8,6 +8,7 @@ import tempfile
 import time
 from contextlib import ExitStack
 from dataclasses import replace
+from itertools import chain
 from pathlib import Path
 import cv2
 from reframe.config import AppConfig, CLASS_IDS, tracking_settings
@@ -29,6 +30,49 @@ from reframe.debug import draw_debug
 from reframe.timing import PhaseTimings
 from reframe.segments import SEGMENT_SCHEMA_VERSION, SegmentStats, counter_snapshot
 from reframe.frame_pixels import TensorFrame
+
+
+def _open_video_input(args: AppConfig, path: Path, resources: ExitStack):
+    """Choose a decoder before any output; never switch after processing starts."""
+    reader = None
+    fallback_reason = None
+    if args.video_decoder == "torchcodec":
+        try:
+            from reframe.torchcodec_reader import TorchCodecReader
+            reader = TorchCodecReader(path, device=args.decode_device,
+                                      batch_size=args.decode_batch_size)
+            # Validate actual pixels and hardware status, not just metadata.
+            first_frame = next(reader)
+        except (ImportError, OSError, RuntimeError, TypeError, AssertionError) as error:
+            if reader is not None:
+                reader.close()
+                reader = None
+            fallback_reason = f"{type(error).__name__}: {error}"
+            logging.warning("TorchCodec startup failed; falling back to OpenCV from frame 1 "
+                            "(frame_processing=reference)", exc_info=True)
+        except BaseException:
+            if reader is not None:
+                reader.close()
+            raise
+        else:
+            resources.callback(reader.close)
+            return (reader, chain((first_frame,), reader),
+                    (reader.fps, reader.width, reader.height, reader.total_frames), None)
+
+    cap = cv2.VideoCapture(str(path))
+    try:
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open input video: {path}")
+        metadata = (cap.get(cv2.CAP_PROP_FPS) or 30.0,
+                    int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                    int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                    int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+    finally:
+        cap.release()
+    frames = iter_video_frames(path)
+    resources.callback(frames.close)
+    return None, frames, metadata, fallback_reason
+
 
 
 def process_video(args: AppConfig) -> None:
@@ -58,25 +102,16 @@ def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg not found in PATH")
 
-    tensor_reader = None
-    if args.video_decoder == "torchcodec":
-        from reframe.torchcodec_reader import TorchCodecReader
-        tensor_reader = TorchCodecReader(input_path, device=args.decode_device,
-                                        batch_size=args.decode_batch_size)
-        decoder_resources.callback(tensor_reader.close)
-        fps, frame_w, frame_h, total_frames = (tensor_reader.fps, tensor_reader.width,
-                                              tensor_reader.height, tensor_reader.total_frames)
-    else:
-        cap = cv2.VideoCapture(str(input_path))
-        try:
-            if not cap.isOpened():
-                raise RuntimeError(f"Could not open input video: {input_path}")
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        finally:
-            cap.release()
+    requested_decoder = args.video_decoder
+    requested_frame_processing = args.frame_processing
+    tensor_reader, frames, metadata, decoder_fallback_reason = _open_video_input(
+        args, input_path, decoder_resources)
+    fps, frame_w, frame_h, total_frames = metadata
+    if tensor_reader is None and args.frame_processing == "tensor":
+        args = replace(args, frame_processing="reference")
+    logging.info("Decoder selected=%s requested=%s frame_processing=%s fallback=%s",
+                 "torchcodec" if tensor_reader is not None else "opencv",
+                 requested_decoder, args.frame_processing, decoder_fallback_reason)
 
     if not math.isfinite(fps) or fps <= 0 or min(frame_w, frame_h) < 64:
         raise ValueError("Invalid video dimensions or FPS")
@@ -218,8 +253,6 @@ def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
             last_subject_key = None
             scene_index = 0
 
-            frames = iter(tensor_reader) if tensor_reader is not None else iter_video_frames(input_path)
-            resources.callback(frames.close)
             actual_yolo_device = None
 
             def segment_snapshot(phase_overrides=None):
@@ -625,11 +658,17 @@ def _process_video(args: AppConfig, decoder_resources: ExitStack) -> None:
             summary = {
                 "source_fps": fps,
                 "source_total_frames": total_frames,
-                "video_io": ({**tensor_reader.telemetry(), "frame_processing": args.frame_processing,
-                              "pixel_metrics": dict(tensor_reader.pixel_metrics)}
-                             if tensor_reader is not None else
-                             {"decoder": "opencv", "actual_device": "cpu",
-                              "cpu_fallback": None, "frame_processing": "reference"}),
+                "video_io": {
+                    **(tensor_reader.telemetry() if tensor_reader is not None else
+                       {"decoder": "opencv", "actual_device": "cpu", "cpu_fallback": None}),
+                    "requested_decoder": requested_decoder,
+                    "requested_frame_processing": requested_frame_processing,
+                    "decoder_fallback": decoder_fallback_reason is not None,
+                    "decoder_fallback_reason": decoder_fallback_reason,
+                    "frame_processing": args.frame_processing,
+                    **({"pixel_metrics": dict(tensor_reader.pixel_metrics)}
+                       if tensor_reader is not None else {}),
+                },
                 "preset": args.preset,
                 "tracking_settings": tracking_settings(args),
                 "legacy_flags": list(args.legacy_flags),

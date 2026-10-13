@@ -29,6 +29,40 @@
   `reframe-snapshot-3079cd0d9549.tar.gz` 本機副本目前缺失，需從原持久儲存取回；
   新產生但未驗證的 archive 已移除，不替換既有報表的證據雜湊。
 
+## 預設 TorchCodec 解碼與 OpenCV 啟動回退機制（2026-10-13）
+
+- 使用者回報在 Colab 測試 decoder 成功，並要求將預設影像解碼器改為 TorchCodec，啟動失敗時回退 OpenCV。
+  **證據與責任邊界**：使用者回報測試成功，但未附帶 TorchCodec 確切版本或詳細執行日誌等新證據；
+  既有 2026-10-13 T4 驗證報表為先前 opt-in 實作之歷史回報證據，並非本次預設／回退新架構之實機證明。
+  本機環境無 CUDA/GPU，不能因此宣稱我們已取得最新 GPU 驗證證明，GPU 驗證項目維持依規格審查。
+- 預設值切換：`AppConfig.video_decoder` 預設為 `torchcodec`，預設 `decode_device` 維持 `cuda:0`。
+  若需直接使用 OpenCV，使用者可傳入 `--video-decoder opencv` 明確略過 TorchCodec 探測。
+- 啟動階段容錯：TorchCodec 模組載入、初始化或首批次驗證時遭遇 `ImportError`、`OSError`、
+  `RuntimeError`、`TypeError` 或 `AssertionError`，管線會透過 `logging.warning(exc_info=True)`
+  保留原生例外完整堆疊追蹤，並自第 1 幀起無縫回退至 OpenCV 解碼。
+- Tensor 處理降級：若指定 `--frame-processing tensor`，但在啟動階段解碼回退至 OpenCV，
+  影像處理模式會明確自動降級為 `reference`（NumPy 模型與渲染路徑）。
+- 致命錯誤（Fatal）：變動幀率輸入（VFR，由 `ValueError` 拋出）與中途串流解碼錯誤（首批驗證通過後）
+  維持嚴格 fatal 失敗，不執行隱式回退。
+- 診斷與 Telemetry：終端 Summary 之 `video_io` 新增 `requested_decoder`、`requested_frame_processing`、
+  `decoder_fallback` (bool)、`decoder_fallback_reason` (str | null)；而 `decoder` 與 `frame_processing`
+  欄位如實反映實際執行路徑。原生 CUDA `cpu_fallback` 診斷維持獨立運作。
+- 硬體收集器嚴格度：`scripts/colab_torchcodec.py` 與 `scripts/youtube_validation.py` 等嚴格收集器
+  驗收標準高於日常執行，透過現有 `validate_decoder` 與硬體檢查直接拒絕任何回退（要求 `nvdec_verified`）。
+- **當前 Smoke 驗證證據（CPU 本機回歸）**：
+  - 環境規格：Python 3.13.5、PyTorch 2.14.1+cpu、TorchCodec 0.17.0+cpu。
+  - 使用真實來源影片進行完整解碼、渲染與 FFmpeg 輸出測試，以下 4 種路徑皆成功完成 11/11 幀端到端處理：
+    1. TorchCodec CPU 解碼；
+    2. 強制模擬啟動階段 `ImportError`，自動回退 OpenCV 解碼；
+    3. 強制模擬啟動階段 `RuntimeError`，tensor 處理自動降級為 reference 且回退 OpenCV；
+    4. 明確指定 `--video-decoder opencv`。
+  - **真實預設無注入回退實測**：於無 CUDA 之 CPU 環境以預設 `cuda:0` 啟動（無人為注入例外），TorchCodec 原生拋出 `RuntimeError: Unsupported device: cuda:0`；管線自動切換 OpenCV／reference，7/7 來源幀完整解碼、渲染與寫入，經 ffprobe 確認輸出為 7 幀。
+  - 測試僅替換感知模型輸出（smoke harness stub），不代表真實神經網路模型推論或 CUDA/GPU 驗證。本機無 GPU 執行證明。
+- 本次最終全套回歸：`python3 -m unittest discover -s tests -v`，380 項中 370 通過、
+  10 skipped。涵蓋首批失敗回退、首幀不重複／遺失、tensor 降級、原生例外與資源釋放、
+  中途錯誤不重播，以及 GPU collector 拒絕 OpenCV 回退；skipped 不算 GPU／真權重驗證。
+- **時戳與 CFR 校驗差異**：TorchCodec 會逐幀嚴格校驗顯示時戳並拒絕非 CFR 串流（變動幀率 VFR 為 fatal 錯誤）；OpenCV 解碼則直接使用容器回報之 FPS，無法建立逐幀時戳校驗。
+
 ## 接手時先做
 
 1. 查看 `git status --short`、`git log -8 --oneline`、目前分支與遠端預設分支；使用既有 checkout，保留使用者修改。
@@ -63,7 +97,7 @@
 
 ## 目前實作與設定
 
-預設 OpenCV／reference，TorchCodec／tensor 仍需明確啟用；tensor 路徑目前支援 `.pt` YOLO 與 ByteTrack。
+預設 TorchCodec／reference（啟動失敗自動回退 OpenCV；若為 tensor 則降級 reference），亦可明確指定 `--video-decoder opencv`；tensor 路徑目前支援 `.pt` YOLO 與 ByteTrack。
 `scripts/colab_torchcodec.py --profiles baseline|stage1|stage2` 控制資料流；
 `--tracking-profile` 控制推論排程，兩者不能混用概念。`--preset` 仍管理類別與相機設定。
 

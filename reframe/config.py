@@ -100,7 +100,7 @@ class AppConfig:
     max_frames: int | None = None
     stats_interval: float = 0.0
     precrop: str | None = None
-    video_decoder: str = 'opencv'
+    video_decoder: str = 'torchcodec'
     decode_device: str = 'cuda:0'
     decode_batch_size: int = 4
     frame_processing: str = 'reference'

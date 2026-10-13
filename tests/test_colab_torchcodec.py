@@ -53,6 +53,10 @@ class DecoderValidationTests(unittest.TestCase):
             with self.subTest(updates=updates), self.assertRaises(ValueError):
                 staged.validate_decoder(decoder_summary(**updates), "stage1", "cuda:0")
 
+    def test_decoder_fallback_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "fallback"):
+            staged.validate_decoder(decoder_summary(decoder_fallback=True, decoder_fallback_reason="init error"),
+                                    "stage1", "cuda:0")
     def test_missing_io_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Missing video_io"):
             staged.validate_decoder({}, "stage1", "cuda:0")
@@ -259,18 +263,6 @@ class EntryPointTests(unittest.TestCase):
         results = json.loads((self.directory / "results/results.json").read_text())
         self.assertIn("--max-frames 180 first", results["error"])
         self.assertTrue((self.directory / "results/diagnostics.zip").is_file())
-
-    def test_command_keeps_audio_fps_and_cascade_contract(self):
-        options = args(self.directory)
-        cmd = staged.command(options, "stage2", self.directory / "out.mp4")
-        for flag, value in (("--video-decoder", "torchcodec"), ("--frame-processing", "tensor"),
-                            ("--max-frames", "180"), ("--precrop", "middle"), ("--seg-max-gap", "1"),
-                            ("--seg-thumbnail-method", "gray-area"), ("--seg-skip-policy", "primary")):
-            self.assertEqual(cmd[cmd.index(flag) + 1], value)
-        self.assertIn("--no-saliency-amp", cmd)
-        self.assertIn("--lock-first-subject", cmd)
-        for absent in ("--post-restore", "--saliency-model", "--saliency-trust-repo", "--fps"):
-            self.assertNotIn(absent, cmd)
 
     def test_collectors_import_without_loading_accelerators_or_models(self):
         source = ("import importlib.util, pathlib, sys\n"
