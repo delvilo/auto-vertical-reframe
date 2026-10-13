@@ -7,6 +7,28 @@
 - [2026-10-13 T4 GPU 全流程真實驗證報表](reports/t4-2026-10-13-gpu-verified.md)
 - [2026-10-13 YouTube 4K 人像驗證與批次推論報表](reports/youtube-validation-2026-10-13-3079cd0d9549.md)
 - 前期基線：[2026-10-12 實作／驗證報表](reports/implementation-validation-2026-10-12.md)。
+
+## TorchCodec 初始化相容性修正
+
+- 使用者回報的 Colab 環境：Python 3.13.15、PyTorch 2.11.0+cu130、Tesla T4；
+  log 未列 TorchCodec 版本。`VideoDecoder` 不接受 `output_dtype`，在解碼前失敗。
+- `reframe/torchcodec_reader.py` 已移除該建構參數，使用 decoder 預設像素型別；
+  實際 batch 仍須通過 RGB uint8 NCHW、裝置、時間戳及 CUDA fallback 檢查。
+  不捕捉 `TypeError` 重試、不改成 CPU 解碼，原生例外保持可見。
+- `example.md` 移除不再需要的 `--saliency-trust-repo`。CLI 仍相容接受此無作用旗標；
+  遷移提示不是本次失敗原因。
+- 此修正已在 Python 3.13.5、PyTorch 2.14.1+cpu、TorchCodec 0.17.0+cpu
+  通過 11 項 decoder 測試及獨立真實 MP4 smoke：30 FPS、11 幀全部依序解碼、
+  RGB 色彩正確、3 個 batch、最大 batch 4 幀。這不是 Colab／T4／NVDEC 驗證。
+- 最終全套測試：374 項，364 通過、10 skipped；不把缺少 CUDA／真權重／upstream
+  reference 的 skipped 項目算作已驗證。
+- 下一個 GPU 檢查：記錄實際 TorchCodec 版本，用原來源先跑 `--max-frames 180`，
+  確認 `cpu_fallback=false` 且 `cpu_fallback_status_known=true`，再跑全片。
+- 本次處理曾誤重建 snapshot 並刪除本機歷史 archive；`snapshot-manifest.json`
+  已恢復歷史雜湊，不能將它解讀為本次修正的封存。歷史
+  `reframe-snapshot-3079cd0d9549.tar.gz` 本機副本目前缺失，需從原持久儲存取回；
+  新產生但未驗證的 archive 已移除，不替換既有報表的證據雜湊。
+
 ## 接手時先做
 
 1. 查看 `git status --short`、`git log -8 --oneline`、目前分支與遠端預設分支；使用既有 checkout，保留使用者修改。

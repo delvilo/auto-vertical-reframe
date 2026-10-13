@@ -18,12 +18,10 @@ if TYPE_CHECKING:
 
 def _open_decoder(path: str | Path, device: str):
     # Keep TorchCodec and its FFmpeg shared-library loading off the default path.
-    import torch
     from torchcodec.decoders import VideoDecoder
 
     return VideoDecoder(
         str(path), device=device, dimension_order="NCHW", seek_mode="exact",
-        output_dtype=torch.uint8,
     )
 
 

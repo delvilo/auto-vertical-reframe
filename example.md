@@ -14,7 +14,6 @@ python3 -m reframe input.mp4 output_vertical.mp4 \
     --precrop middle \
     --lock-first-subject \
     --saliency-device cuda \
-    --saliency-trust-repo \
     --no-saliency-amp \
     --video-encoder hevc_nvenc
 ```
@@ -34,8 +33,7 @@ python3 -m reframe input.mp4 output_fixed.mp4 \
     --lock-first-subject \
     --fixed-zoom 1.10 \
     --dead-zone 0.08 \
-    --pan-time 0.55 \
-    --saliency-trust-repo
+    --pan-time 0.55
 ```
 
 ## Two-person podcast
@@ -46,8 +44,7 @@ python3 -m reframe podcast.mp4 output_podcast.mp4 \
     --two-person-framing \
     --two-person-threshold 0.75 \
     --switch-score-threshold 1.25 \
-    --min-subject-hold-frames 18 \
-    --saliency-trust-repo
+    --min-subject-hold-frames 18
 ```
 
 ## Sports and action
@@ -58,8 +55,7 @@ python3 -m reframe skate.mp4 output_sports.mp4 \
     --classes person bicycle motorcycle \
     --motion-response 0.18 \
     --motion-damping 0.75 \
-    --max-step-x 16.0 \
-    --saliency-trust-repo
+    --max-step-x 16.0
 ```
 
 ## Debug preview and bounded validation
@@ -67,7 +63,6 @@ python3 -m reframe skate.mp4 output_sports.mp4 \
 ```bash
 python3 -u -m reframe footage.mp4 output_test.mp4 \
     --preset talking_head \
-    --saliency-trust-repo \
     --save-debug-preview \
     --debug-path output_debug_hud.mp4 \
     --max-frames 90 \
