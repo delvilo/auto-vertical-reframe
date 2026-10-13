@@ -4,6 +4,8 @@
 
 具備場景感知的直式自動構圖 CLI 工具，將橫向影片重構為 9:16 直式影音，全程鎖定主角不失焦。
 
+> 🤖 **本專案由 AI 建構**（Built with AI）。
+
 ---
 
 ## 重點特色 (Highlights)
@@ -252,6 +254,6 @@ python auto_reframe.py input.mp4 output_fixed.mp4 \
 
 ## 專案狀態與授權 (Status & License)
 
-本實作衍生自 [KazKozDev/auto-vertical-reframe](https://github.com/KazKozDev/auto-vertical-reframe)。
-
-採用 MIT 授權條款 — 詳見 [LICENSE](LICENSE)。
+- **AI 建構說明**：本專案由 AI 建構與維護。
+- **專案來源**：本實作衍生自 [KazKozDev/auto-vertical-reframe](https://github.com/KazKozDev/auto-vertical-reframe)。
+- **授權條款**：採用 MIT 授權條款 — 詳見 [LICENSE](LICENSE)。

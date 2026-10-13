@@ -4,6 +4,8 @@
 
 Scene-aware vertical auto-reframe CLI that turns horizontal footage into 9:16 video without losing the subject.
 
+> 🤖 **This project is built with AI.**
+
 ---
 
 ## Highlights
@@ -252,6 +254,6 @@ python auto_reframe.py input.mp4 output_fixed.mp4 \
 
 ## Status & License
 
-This implementation is derived from [KazKozDev/auto-vertical-reframe](https://github.com/KazKozDev/auto-vertical-reframe).
-
-Licensed under the MIT License — see [LICENSE](LICENSE).
+- **AI Development**: This project is built and maintained with AI.
+- **Origin**: This implementation is derived from [KazKozDev/auto-vertical-reframe](https://github.com/KazKozDev/auto-vertical-reframe).
+- **License**: Licensed under the MIT License — see [LICENSE](LICENSE).
