@@ -63,6 +63,15 @@
   中途錯誤不重播，以及 GPU collector 拒絕 OpenCV 回退；skipped 不算 GPU／真權重驗證。
 - **時戳與 CFR 校驗差異**：TorchCodec 會逐幀嚴格校驗顯示時戳並拒絕非 CFR 串流（變動幀率 VFR 為 fatal 錯誤）；OpenCV 解碼則直接使用容器回報之 FPS，無法建立逐幀時戳校驗。
 
+## 版本升級 0.2.2
+
+- `pyproject.toml` 與 `reframe.__version__` 同步由 0.2.1 升為 0.2.2，Python 下限仍為 3.13。
+  中英文 README 同步記錄本版 decoder 修正與更新後的 metadata 重裝指令；歷史版本證據不改寫。
+- Python 3.13.5 的臨時隔離 venv（共用既有依賴、無依賴重裝）已完成 editable wheel
+  建置／安裝；installed metadata、runtime 版本與實際 `Package=... version=0.2.2`
+  日誌一致，已安裝的 `auto-reframe --help` 正常並保留 TorchCodec 預設。臨時 venv 已移除。
+- 本次僅版本與文件升級；沒有重跑 GPU／模型推論，也未建立 Git tag 或 GitHub release。
+
 ## 接手時先做
 
 1. 查看 `git status --short`、`git log -8 --oneline`、目前分支與遠端預設分支；使用既有 checkout，保留使用者修改。

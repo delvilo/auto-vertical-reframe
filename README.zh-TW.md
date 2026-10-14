@@ -6,6 +6,12 @@
 
 > 🤖 **本專案由 AI 建構**（Built with AI）。
 
+## 版本 0.2.2
+
+- 移除不支援的 `output_dtype` 參數，修正 TorchCodec 初始化。
+- 預設使用 TorchCodec，啟動失敗時記錄錯誤並回退 OpenCV；tensor 模式回退時切換為 reference。中途解碼錯誤仍停止。
+- Python 相容性維持 **3.13+**。更新 checkout 後，執行 `python3 -m pip install --no-deps -e .` 刷新已安裝的套件 metadata，不變更加速器依賴。
+
 ---
 
 ## 重點特色 (Highlights)

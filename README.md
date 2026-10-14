@@ -6,6 +6,12 @@ Scene-aware vertical auto-reframe CLI that turns horizontal footage into 9:16 vi
 
 > 🤖 **This project is built with AI.**
 
+## Version 0.2.2
+
+- Fix TorchCodec initialization by removing the unsupported `output_dtype` argument.
+- Default to TorchCodec with logged OpenCV startup fallback; tensor mode switches to reference on fallback. Midstream errors remain fatal.
+- Python compatibility remains **3.13+**. After updating a checkout, reinstall with `python3 -m pip install --no-deps -e .` to refresh installed package metadata without changing accelerator dependencies.
+
 ---
 
 ## Highlights
